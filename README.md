@@ -212,6 +212,8 @@ Queries the live HTCondor job queue. Tries the `htcondor` and `htcondor2` Python
 ### `display.py`
 Builds and drives the Rich terminal dashboard. In live mode (`without --once`), renders inside a `rich.live.Live` context that refreshes every `--interval` seconds. Exits automatically when `WORKFLOW_TERMINATED` is observed in the database.
 
+![terminal dashboard](./images/terminal-dashboard.png)
+
 ## Troubleshooting
 
 **"Stampede database not found"**
