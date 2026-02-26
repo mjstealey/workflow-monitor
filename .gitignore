@@ -1,0 +1,68 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+wheels/
+sdist/
+.eggs/
+
+# uv / virtual environments
+.venv/
+venv/
+.uv/
+
+# uv lock file is intentionally committed; ignore only the cache
+.uv-cache/
+
+# Pytest / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+*.log
+
+# Type checkers
+.mypy_cache/
+.dmypy.json
+.pyright/
+.ruff_cache/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.ropeproject/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Claude Code
+# Project-level Claude memory and settings contain local filesystem paths
+.claude/
+
+# Environment / secrets
+.env
+.env.*
+*.token
+*.pem
+*.key
+*.p12
+*.pfx
