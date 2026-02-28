@@ -10,13 +10,13 @@ This project lives in `/Users/stealey/GitHub/pegasusai/workflow-monitor`. All wo
 
 Before writing code or making recommendations for tasks involving Pegasus or HTCondor, read the relevant reference file(s) below. These contain distilled documentation, API signatures, and configuration patterns that are more reliable than training knowledge alone.
 
-### Pegasus WMS — `/Users/stealey/claude/references/pegasus.md`
+### Pegasus WMS — `~/.claude/references/pegasus.md`
 
 Covers Pegasus 5.1.2: Python API (`Pegasus.api`), the three catalogs (RC, TC, SC), YAML formats, data configuration modes, container support, CLI tools, `pegasus.properties`, and deployment scenarios.
 
 **Consult for:** workflow definition, planning (`pegasus-plan`), submission, monitoring, and debugging.
 
-### HTCondor — `/Users/stealey/claude/references/htcondor.md`
+### HTCondor — `~/.claude/references/htcondor.md`
 
 Covers HTCondor 24.x/25.x: submit file syntax, job universes, file transfer, DAGMan, Python bindings (`htcondor` package), ClassAds, CLI tools, and configuration.
 
