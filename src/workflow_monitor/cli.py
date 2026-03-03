@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -69,6 +70,27 @@ def build_parser() -> argparse.ArgumentParser:
         default=False,
         help="Print current status once and exit (non-interactive)",
     )
+    p.add_argument(
+        "--log",
+        nargs="?",
+        const="auto",
+        default=None,
+        metavar="PATH",
+        help="Log events to a JSONL file for replay (default: {submit_dir}/workflow-events.jsonl)",
+    )
+    p.add_argument(
+        "--replay",
+        metavar="PATH",
+        default=None,
+        help="Replay a JSONL event log file in the TUI dashboard",
+    )
+    p.add_argument(
+        "--speed",
+        type=float,
+        default=1.0,
+        metavar="MULTIPLIER",
+        help="Replay speed multiplier (default: 1.0, e.g. 4 = 4x speed)",
+    )
 
     # ── HTCondor options ─────────────────────────────────────────────────────
     condor = p.add_argument_group("HTCondor options")
@@ -116,6 +138,26 @@ def main(argv: list | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
+    # ── Replay mode ───────────────────────────────────────────────────────────
+    if args.replay is not None:
+        from .replay import ReplayEngine
+
+        replay_path = Path(args.replay)
+        if not replay_path.exists():
+            print(f"[error] Replay file not found: {replay_path}", file=sys.stderr)
+            return 1
+        try:
+            engine = ReplayEngine(
+                replay_path,
+                speed=args.speed,
+                events_n=args.events,
+            )
+            engine.run(show_all=args.all_jobs)
+        except (ValueError, json.JSONDecodeError) as exc:
+            print(f"[error] {exc}", file=sys.stderr)
+            return 1
+        return 0
+
     target = Path(args.target)
 
     # ── Locate workflow ───────────────────────────────────────────────────────
@@ -150,6 +192,14 @@ def main(argv: list | None = None) -> int:
     if getattr(args, "password_file", None):
         condor_kwargs["password_file"] = args.password_file
 
+    # ── Resolve log path ─────────────────────────────────────────────────────
+    log_path = None
+    if args.log is not None:
+        if args.log == "auto":
+            log_path = info.submit_dir / "workflow-events.jsonl"
+        else:
+            log_path = Path(args.log)
+
     # ── Run monitor ───────────────────────────────────────────────────────────
     with StampedeDB(db_path) as db:
         run_monitor(
@@ -160,6 +210,7 @@ def main(argv: list | None = None) -> int:
             events_n=args.events,
             condor_kwargs=condor_kwargs,
             once=args.once,
+            log_path=log_path,
         )
 
     return 0

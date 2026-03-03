@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import List, Optional
 
 from rich import box
@@ -26,6 +27,7 @@ from .db import (
     fmt_duration,
     fmt_timestamp,
 )
+from .event_log import EventLogger
 from .htcondor_poll import query_queue, format_job_status
 
 
@@ -43,17 +45,36 @@ def _wf_state_text(snap: WorkflowSnapshot) -> Text:
 
 # ─── Header panel ─────────────────────────────────────────────────────────────
 
-def _make_header(info: WorkflowInfo, snap: WorkflowSnapshot, refresh_ts: float) -> Panel:
+def _make_header(
+    info: WorkflowInfo,
+    snap: WorkflowSnapshot,
+    refresh_ts: float,
+    replay_info: Optional[dict] = None,
+) -> Panel:
     grid = Table.grid(expand=True, padding=(0, 0))
     grid.add_column(ratio=1)
     grid.add_column(justify="right", no_wrap=True)
 
-    # Row 1: title + refresh time
+    # Row 1: title + refresh/replay badge
     title = Text()
     title.append("Pegasus Workflow Monitor", style="bold white")
-    refresh = Text(no_wrap=True)
-    refresh.append("Refreshed ", style="dim")
-    refresh.append(datetime.fromtimestamp(refresh_ts).strftime("%H:%M:%S"), style="white")
+    if replay_info is not None:
+        title.append("  ")
+        title.append(" REPLAY ", style="bold white on dark_orange3")
+        speed = replay_info.get("speed", 1.0)
+        speed_str = f"{speed:g}x" if speed != int(speed) else f"{int(speed)}x"
+        title.append(f" {speed_str}", style="bold dark_orange3")
+
+    right_col = Text(no_wrap=True)
+    if replay_info is not None:
+        right_col.append(
+            datetime.fromtimestamp(refresh_ts).strftime("%H:%M:%S"), style="dim white"
+        )
+    else:
+        right_col.append("Refreshed ", style="dim")
+        right_col.append(
+            datetime.fromtimestamp(refresh_ts).strftime("%H:%M:%S"), style="white"
+        )
 
     # Row 2: workflow details
     details = Text()
@@ -68,7 +89,7 @@ def _make_header(info: WorkflowInfo, snap: WorkflowSnapshot, refresh_ts: float) 
     version.append("pegasus ", style="dim")
     version.append(info.planner_version, style="dim")
 
-    grid.add_row(title, refresh)
+    grid.add_row(title, right_col)
     grid.add_row(details, version)
     return Panel(grid, style="on grey7", padding=(0, 1))
 
@@ -269,6 +290,7 @@ def build_layout(
     condor_jobs: Optional[List],
     events_n: int,
     refresh_ts: float,
+    replay_info: Optional[dict] = None,
 ) -> Layout:
     layout = Layout()
     layout.split_column(
@@ -282,7 +304,7 @@ def build_layout(
         Layout(name="infra", ratio=1),
     )
 
-    layout["header"].update(_make_header(info, snap, refresh_ts))
+    layout["header"].update(_make_header(info, snap, refresh_ts, replay_info=replay_info))
     layout["status"].update(_make_status_bar(snap))
     layout["jobs"].update(_make_job_table(snap, show_all=show_all, condor_jobs=condor_jobs))
     layout["infra"].update(_make_infra_summary(snap))
@@ -302,6 +324,7 @@ def run_monitor(
     condor_constraint: Optional[str] = None,
     condor_kwargs: Optional[dict] = None,
     once: bool = False,
+    log_path: Optional[Path] = None,
 ) -> None:
     """Run the live terminal dashboard.
 
@@ -315,10 +338,16 @@ def run_monitor(
     condor_constraint: Optional HTCondor ClassAd constraint for live queue.
     condor_kwargs:     Extra kwargs forwarded to htcondor_poll.query_queue().
     once:              Print status once and exit (non-interactive).
+    log_path:          If set, write JSONL event log to this path.
     """
     ck = condor_kwargs or {}
 
     console = Console()
+
+    logger: Optional[EventLogger] = None
+    if log_path is not None:
+        logger = EventLogger(info, db, log_path=log_path)
+        console.print(f"[dim]Logging events to {logger.path}[/dim]")
 
     def _poll_condor() -> List:
         try:
@@ -330,6 +359,8 @@ def run_monitor(
         snap = db.snapshot()
         condor_jobs = _poll_condor()
         ts = time.time()
+        if logger is not None:
+            logger.record(snap, condor_jobs)
         return snap, condor_jobs, ts
 
     if once:
@@ -341,6 +372,8 @@ def run_monitor(
             console.print(_make_infra_summary(snap))
         console.print(_make_events_panel(snap, n=events_n))
         _print_final_summary(console, snap)
+        if logger is not None:
+            logger.close(snap)
         return
 
     with Live(
@@ -373,6 +406,8 @@ def run_monitor(
 
     # After live session ends, print a brief final summary
     _print_final_summary(console, snap)
+    if logger is not None:
+        logger.close(snap)
 
 
 def _print_final_summary(console: Console, snap: WorkflowSnapshot) -> None:
