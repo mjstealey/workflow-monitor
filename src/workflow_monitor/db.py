@@ -89,6 +89,7 @@ class JobRecord:
     submit_time: Optional[float]
     start_time: Optional[float]
     end_time: Optional[float]
+    _now: Optional[float] = field(default=None, repr=False)
 
     @property
     def disp_state(self) -> str:
@@ -99,7 +100,8 @@ class JobRecord:
         if self.start_time and self.end_time:
             return self.end_time - self.start_time
         if self.start_time and self.disp_state == "RUNNING":
-            return datetime.now().timestamp() - self.start_time
+            now = self._now if self._now is not None else datetime.now().timestamp()
+            return now - self.start_time
         return None
 
     @property
@@ -144,7 +146,7 @@ class WorkflowSnapshot:
     def elapsed(self) -> Optional[float]:
         if self.wf_start is None:
             return None
-        end = self.wf_end if self.wf_end else datetime.now().timestamp()
+        end = self.wf_end if self.wf_end else self.poll_time
         return end - self.wf_start
 
     def job_counts(self) -> Dict[str, int]:

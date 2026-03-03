@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import time
-from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -25,6 +24,7 @@ class ReplayEngine:
 
         self._events: List[Dict[str, Any]] = []
         self._info: Optional[WorkflowInfo] = None
+        self._header_wf_start: Optional[float] = None
 
         self._load()
 
@@ -61,8 +61,37 @@ class ReplayEngine:
             basedir=Path(header.get("submit_dir", ".")),
         )
 
+        # Capture wf_start from header if logged (for stable elapsed time)
+        self._header_wf_start = header.get("wf_start")
+
         # Keep all events except header for replay
         self._events = raw[1:]
+
+        # Pre-scan for the full job roster (used when no jobs_init event exists)
+        self._prescan_jobs = self._prescan_job_roster()
+
+    def _prescan_job_roster(self) -> Dict[int, Dict[str, str]]:
+        """Scan all events to discover the complete set of job IDs and metadata."""
+        jobs: Dict[int, Dict[str, str]] = {}
+        for ev in self._events:
+            if ev.get("event_type") == "jobs_init":
+                # If a jobs_init event exists, use it and stop scanning
+                for j in ev.get("jobs", []):
+                    jid = j.get("job_id")
+                    if jid is not None:
+                        jobs[jid] = {
+                            "exec_job_id": j.get("exec_job_id", ""),
+                            "type_desc": j.get("type_desc", "compute"),
+                        }
+                return jobs
+            if ev.get("event_type") == "job_state":
+                jid = ev.get("job_id")
+                if jid is not None and jid not in jobs:
+                    jobs[jid] = {
+                        "exec_job_id": ev.get("exec_job_id", ""),
+                        "type_desc": ev.get("type_desc", "compute"),
+                    }
+        return jobs
 
     @property
     def info(self) -> WorkflowInfo:
@@ -107,6 +136,7 @@ class ReplayEngine:
         wf_start: Optional[float],
         wf_end: Optional[float],
         recent_events: List[Dict],
+        frame_ts: float,
     ) -> tuple:
         """Apply a frame's events and return updated state + snapshot."""
         for ev in frame_events:
@@ -119,6 +149,22 @@ class ReplayEngine:
                     wf_start = ev.get("timestamp")
                 elif wf_state == "WORKFLOW_TERMINATED":
                     wf_end = ev.get("timestamp")
+
+            elif etype == "jobs_init":
+                # Pre-populate all jobs as UNSUBMITTED for stable total count
+                for j in ev.get("jobs", []):
+                    jid = j.get("job_id")
+                    if jid is not None and jid not in job_state:
+                        job_state[jid] = {
+                            "exec_job_id": j.get("exec_job_id", ""),
+                            "type_desc": j.get("type_desc", "compute"),
+                            "raw_state": None,
+                            "exitcode": None,
+                            "site": None,
+                            "submit_time": None,
+                            "start_time": None,
+                            "end_time": None,
+                        }
 
             elif etype == "job_state":
                 jid = ev.get("job_id")
@@ -162,10 +208,14 @@ class ReplayEngine:
                 if ev.get("wf_state") == "WORKFLOW_TERMINATED" and wf_end is None:
                     wf_end = ev.get("timestamp")
 
+        # Use wf_start from header if not yet set from events
+        if wf_start is None and self._header_wf_start is not None:
+            wf_start = self._header_wf_start
+
         # Trim recent events to last N
         recent_events[:] = recent_events[-self._events_n:]
 
-        # Build snapshot
+        # Build snapshot with frame_ts as poll_time and _now on each JobRecord
         jobs = [
             JobRecord(
                 job_id=jid,
@@ -177,6 +227,7 @@ class ReplayEngine:
                 submit_time=js["submit_time"],
                 start_time=js["start_time"],
                 end_time=js["end_time"],
+                _now=frame_ts,
             )
             for jid, js in sorted(job_state.items())
         ]
@@ -189,6 +240,7 @@ class ReplayEngine:
             jobs=jobs,
             # Recent events in reverse order (newest first) to match db.get_recent_events
             recent_events=list(reversed(recent_events)),
+            poll_time=frame_ts,
         )
 
         return snap, wf_state, wf_status, wf_start, wf_end
@@ -207,8 +259,19 @@ class ReplayEngine:
 
         replay_info = {"speed": self._speed}
 
-        # Mutable state across frames
+        # Pre-populate all jobs as UNSUBMITTED for stable total count
         job_state: Dict[int, Dict[str, Any]] = {}
+        for jid, jmeta in self._prescan_jobs.items():
+            job_state[jid] = {
+                "exec_job_id": jmeta["exec_job_id"],
+                "type_desc": jmeta["type_desc"],
+                "raw_state": None,
+                "exitcode": None,
+                "site": None,
+                "submit_time": None,
+                "start_time": None,
+                "end_time": None,
+            }
         wf_state = "UNKNOWN"
         wf_status: Optional[int] = None
         wf_start: Optional[float] = None
@@ -223,14 +286,15 @@ class ReplayEngine:
         ) as live:
             try:
                 for i, frame in enumerate(frames):
+                    frame_ts = float(frame[0].get("timestamp", time.time()))
+
                     snap, wf_state, wf_status, wf_start, wf_end = (
                         self._reconstruct(
                             frame, job_state, wf_state, wf_status,
-                            wf_start, wf_end, recent_events,
+                            wf_start, wf_end, recent_events, frame_ts,
                         )
                     )
 
-                    frame_ts = frame[0].get("timestamp", time.time())
                     layout = build_layout(
                         info, snap, show_all, None,
                         self._events_n, frame_ts,
@@ -241,7 +305,7 @@ class ReplayEngine:
                     # Sleep between frames
                     if i < len(frames) - 1:
                         next_ts = frames[i + 1][0].get("timestamp", frame_ts)
-                        delta = max(0, float(next_ts) - float(frame_ts))
+                        delta = max(0, float(next_ts) - frame_ts)
                         if self._speed > 0:
                             time.sleep(delta / self._speed)
 

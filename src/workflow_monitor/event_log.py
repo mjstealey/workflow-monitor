@@ -34,6 +34,7 @@ class EventLogger:
         self._high_water_ts: float = 0.0
         self._last_wf_state: Optional[str] = None
         self._last_condor_ids: set[str] = set()
+        self._jobs_init_emitted: bool = False
 
         self._fh = open(self._path, "a")
         self._write_header()
@@ -46,6 +47,7 @@ class EventLogger:
         self._fh.flush()
 
     def _write_header(self) -> None:
+        wf_times = self._db.get_workflow_times()
         self._emit({
             "event_type": "workflow_start",
             "timestamp": time.time(),
@@ -53,6 +55,7 @@ class EventLogger:
             "user": self._info.user,
             "planner_version": self._info.planner_version,
             "submit_dir": str(self._info.submit_dir),
+            "wf_start": wf_times.get("start"),
         })
 
     # ── Public API ───────────────────────────────────────────────────────────
@@ -63,6 +66,9 @@ class EventLogger:
         condor_jobs: Optional[List[Dict]] = None,
     ) -> None:
         """Record new events from the latest poll cycle."""
+        if not self._jobs_init_emitted:
+            self._emit_jobs_init(snapshot)
+            self._jobs_init_emitted = True
         self._record_workflow_state(snapshot)
         self._record_job_events()
         self._record_condor_poll(condor_jobs)
@@ -88,6 +94,22 @@ class EventLogger:
         return self._path
 
     # ── Event detection ──────────────────────────────────────────────────────
+
+    def _emit_jobs_init(self, snapshot: WorkflowSnapshot) -> None:
+        """Emit a jobs_init event listing the full job roster from the first snapshot."""
+        jobs = []
+        for j in snapshot.jobs:
+            jobs.append({
+                "job_id": j.job_id,
+                "exec_job_id": j.exec_job_id,
+                "type_desc": j.type_desc,
+            })
+        self._emit({
+            "event_type": "jobs_init",
+            "timestamp": time.time(),
+            "total_jobs": len(jobs),
+            "jobs": jobs,
+        })
 
     def _record_workflow_state(self, snapshot: WorkflowSnapshot) -> None:
         if snapshot.wf_state != self._last_wf_state:
