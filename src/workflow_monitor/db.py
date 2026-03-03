@@ -318,6 +318,27 @@ class StampedeDB:
             )
         return jobs
 
+    def get_events_since(self, after_ts: float) -> List[Dict]:
+        """Return all job-state transitions after *after_ts*, ordered ASC."""
+        cur = self._conn_or_raise().cursor()
+        cur.execute(
+            """
+            SELECT
+                j.exec_job_id,
+                j.type_desc,
+                js.state,
+                js.timestamp,
+                j.job_id
+            FROM job j
+            JOIN job_instance ji ON j.job_id = ji.job_id
+            JOIN jobstate js ON ji.job_instance_id = js.job_instance_id
+            WHERE js.timestamp > ?
+            ORDER BY js.timestamp ASC, js.jobstate_submit_seq ASC
+            """,
+            (after_ts,),
+        )
+        return [dict(row) for row in cur.fetchall()]
+
     def get_recent_events(self, limit: int = 20) -> List[Dict]:
         """Return the *limit* most recent job-state events."""
         cur = self._conn_or_raise().cursor()

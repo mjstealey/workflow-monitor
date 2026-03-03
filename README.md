@@ -12,11 +12,11 @@ A real-time terminal dashboard for monitoring running [Pegasus WMS](https://pega
 │ [████████████████░░░░░░░░░░░░░░░░░░░░░░░░]                                   │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭──────────────────────────────── Compute Jobs ────────────────────────────────╮
-│  Job Name                        Type       State      Exit  Duration         │
-│  preprocess_ID0000001            compute    SUCCESS    0       1m00s          │
-│  analyze_ID0000004               compute    RUNNING    -         22s          │
-│  findrange_ID0000003             compute    SUCCESS    0         45s          │
-│  findrange_ID0000002             compute    SUCCESS    0         41s          │
+│  Job Name                        Type       State      Exit  Duration        │
+│  preprocess_ID0000001            compute    SUCCESS    0       1m00s         │
+│  analyze_ID0000004               compute    RUNNING    -         22s         │
+│  findrange_ID0000003             compute    SUCCESS    0         45s         │
+│  findrange_ID0000002             compute    SUCCESS    0         41s         │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭─────────────────────────────── Recent Events ────────────────────────────────╮
 │ 12:55:31    analyze_ID0000004                       EXECUTE                  │
@@ -34,13 +34,15 @@ A real-time terminal dashboard for monitoring running [Pegasus WMS](https://pega
 - **Credential-aware** — supports IDTOKEN, X.509/GSI certificates, and password file auth for remote pools; local pools need nothing
 - **Flexible target** — point at a workflow base directory, a specific run directory, or a `braindump.yml` file directly
 - **Non-interactive mode** — `--once` for scripting, CI, or quick status checks
+- **Event logging** — `--log` captures every workflow and job state transition to a JSONL file for replay or post-hoc analysis
+- **Replay mode** — `--replay` reads a JSONL event log and visually replays the workflow in the TUI at configurable speed (`--speed`)
 
 ## Requirements
 
 - Python 3.9+
 - [uv](https://docs.astral.sh/uv/) package manager
-- A planned and running (or completed) Pegasus workflow
-- HTCondor with `condor_q` on `PATH` (for live queue data)
+- A planned and running (or completed) Pegasus workflow (not needed for `--replay`)
+- HTCondor with `condor_q` on `PATH` (for live queue data; not needed for `--replay`)
 
 ## Installation
 
@@ -75,6 +77,18 @@ uv run workflow-monitor /path/to/submit/stealey/pegasus/diamond/run0003
 
 # Print current status once and exit
 uv run workflow-monitor --once /path/to/diamond-workflow
+
+# Monitor with JSONL event logging (auto-path in submit dir)
+uv run workflow-monitor --log /path/to/diamond-workflow
+
+# Log events to a specific file
+uv run workflow-monitor --log /tmp/events.jsonl /path/to/diamond-workflow
+
+# Replay a recorded event log (no live workflow or HTCondor needed)
+uv run workflow-monitor --replay example-logs/workflow-events.jsonl
+
+# Replay at 4x speed
+uv run workflow-monitor --replay example-logs/workflow-events.jsonl --speed 4
 ```
 
 ### With the example diamond workflow
@@ -99,7 +113,8 @@ uv run workflow-monitor /path/to/pegasus-macos-local/diamond-workflow
 
 ```
 usage: workflow-monitor [-h] [--version] [--interval SECONDS] [--all-jobs]
-                        [--events N] [--once] [--schedd NAME]
+                        [--events N] [--once] [--log [PATH]] [--replay PATH]
+                        [--speed MULTIPLIER] [--schedd NAME]
                         [--collector HOST[:PORT]] [--token PATH] [--cert PATH]
                         [--key PATH] [--password-file PATH]
                         [TARGET]
@@ -124,6 +139,9 @@ The `TARGET` is resolved in this order:
 | `--all-jobs`, `-a` | off | Show all job types (stage-in/out, cleanup, etc.) in the job table, not just compute jobs. |
 | `--events N`, `-e` | `15` | Number of recent job-state events to show in the events panel. |
 | `--once` | off | Print the current status once and exit. Useful for scripting. |
+| `--log [PATH]` | off | Log all events to a JSONL file. If `PATH` is omitted, writes to `{submit_dir}/workflow-events.jsonl`. |
+| `--replay PATH` | — | Replay a JSONL event log in the TUI dashboard (no live workflow needed). |
+| `--speed MULTIPLIER` | `1.0` | Replay speed multiplier (e.g. `4` = 4x speed, `0.5` = half speed). Only used with `--replay`. |
 | `--version`, `-V` | — | Print the version and exit. |
 
 ### HTCondor options
@@ -172,6 +190,52 @@ A compact summary of non-compute jobs grouped by type and state. Hidden when no 
 ### Recent Events
 A chronological list of the most recent job-state transitions. Each row shows the time, job name, and raw Pegasus event name. The number of rows is controlled by `--events`.
 
+## Event log (`--log`)
+
+When `--log` is enabled, the monitor writes a JSONL (JSON Lines) file where each line is a self-contained JSON object representing a workflow event. This file can be replayed, ingested into analytics tools, or consumed by other applications.
+
+### Event types
+
+| Event type | Emitted when | Key fields |
+|------------|-------------|------------|
+| `workflow_start` | Logger initializes (first line) | `dax_label`, `user`, `planner_version`, `submit_dir` |
+| `workflow_state` | Workflow state changes | `state` (`WORKFLOW_STARTED`, `WORKFLOW_TERMINATED`), `status` |
+| `job_state` | A job transitions to a new state | `exec_job_id`, `type_desc`, `state`, `job_id` |
+| `htcondor_poll` | HTCondor queue contents change | `jobs` (list of ClassAd dicts) |
+| `workflow_end` | Monitor exits (last line) | `wf_state`, `wf_status`, `total_jobs`, `done`, `failed`, `elapsed` |
+
+Every event includes `event_type`, `timestamp` (Unix float), and `wf_uuid`.
+
+### Example
+
+```bash
+# Monitor and log
+uv run workflow-monitor --log /path/to/workflow
+
+# Inspect the log
+cat /path/to/submit/dir/workflow-events.jsonl | python -m json.tool
+```
+
+## Replay mode (`--replay`)
+
+Replay mode reads a JSONL event log (produced by `--log`) and visually replays the workflow in the same Rich TUI dashboard. No live Pegasus workflow or HTCondor environment is required — useful for demos, post-hoc review, and debugging.
+
+```bash
+# Replay at normal speed
+uv run workflow-monitor --replay example-logs/workflow-events.jsonl
+
+# Replay at 4x speed
+uv run workflow-monitor --replay example-logs/workflow-events.jsonl --speed 4
+
+# Slow-motion replay
+uv run workflow-monitor --replay example-logs/workflow-events.jsonl --speed 0.5
+
+# Show all job types (including infrastructure)
+uv run workflow-monitor --replay example-logs/workflow-events.jsonl --all-jobs
+```
+
+The header displays a `REPLAY` badge and the current speed multiplier. Events are grouped by timestamp and paced according to the original timing, scaled by `--speed`. Press `Ctrl+C` to exit early.
+
 ## Job states
 
 | Display state | Meaning |
@@ -209,8 +273,14 @@ Queries the stampede SQLite database in read-only mode. The database is written 
 ### `htcondor_poll.py`
 Queries the live HTCondor job queue. Tries the `htcondor` and `htcondor2` Python packages first; falls back to `condor_q -json` if the packages are unavailable or fail (e.g. architecture mismatch). Credential setup is applied before any query attempt.
 
+### `event_log.py`
+JSONL event logger for workflow replay. When `--log` is active, captures workflow state changes, job state transitions, and HTCondor queue snapshots to a structured log file. Tracks a high-water timestamp to avoid duplicate events across poll cycles.
+
+### `replay.py`
+JSONL replay engine. Loads an event log, reconstructs workflow snapshots progressively frame-by-frame, and drives the Rich TUI at configurable speed. No database or HTCondor connection required.
+
 ### `display.py`
-Builds and drives the Rich terminal dashboard. In live mode (`without --once`), renders inside a `rich.live.Live` context that refreshes every `--interval` seconds. Exits automatically when `WORKFLOW_TERMINATED` is observed in the database.
+Builds and drives the Rich terminal dashboard. In live mode (`without --once`), renders inside a `rich.live.Live` context that refreshes every `--interval` seconds. Exits automatically when `WORKFLOW_TERMINATED` is observed in the database. When `--log` is active, feeds each refresh cycle to the `EventLogger`.
 
 ![terminal dashboard](./images/terminal-dashboard.png)
 
@@ -239,6 +309,9 @@ uv run workflow-monitor --help
 
 # Run against a completed workflow (no HTCondor required)
 uv run workflow-monitor --once /path/to/workflow
+
+# Replay the bundled example log (no Pegasus or HTCondor required)
+uv run workflow-monitor --replay example-logs/workflow-events.jsonl --speed 4
 ```
 
 The project uses [hatchling](https://hatch.pypa.io/) as its build backend and [uv](https://docs.astral.sh/uv/) as the package and virtual environment manager.
