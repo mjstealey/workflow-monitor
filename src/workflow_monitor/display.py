@@ -347,7 +347,10 @@ def run_monitor(
     logger: Optional[EventLogger] = None
     if log_path is not None:
         logger = EventLogger(info, db, log_path=log_path)
-        console.print(f"[dim]Logging events to {logger.path}[/dim]")
+        if logger.resumed:
+            console.print(f"[dim]Resuming event log at {logger.path}[/dim]")
+        else:
+            console.print(f"[dim]Logging events to {logger.path}[/dim]")
 
     def _poll_condor() -> List:
         try:

@@ -64,8 +64,56 @@ class ReplayEngine:
         # Capture wf_start from header if logged (for stable elapsed time)
         self._header_wf_start = header.get("wf_start")
 
-        # Keep all events except header for replay
-        self._events = raw[1:]
+        # Keep all events except headers for replay.
+        # Old logs from stop/restart sessions may contain multiple
+        # workflow_start/jobs_init/workflow_end markers.  We strip
+        # extra headers and intermediate workflow_end events so the
+        # replay sees a single continuous series.
+        body = raw[1:]
+
+        # Filter out extra session artifacts
+        cleaned: List[Dict[str, Any]] = []
+        for ev in body:
+            etype = ev.get("event_type")
+            if etype == "workflow_start":
+                # Extra header from a resumed session — skip
+                continue
+            if etype == "jobs_init" and cleaned and any(
+                e.get("event_type") == "jobs_init" for e in cleaned
+            ):
+                # Duplicate jobs_init — skip
+                continue
+            cleaned.append(ev)
+
+        # Remove intermediate workflow_end events (keep only the last one)
+        final_end_idx = None
+        for i in range(len(cleaned) - 1, -1, -1):
+            if cleaned[i].get("event_type") == "workflow_end":
+                final_end_idx = i
+                break
+        if final_end_idx is not None:
+            cleaned = [
+                ev for i, ev in enumerate(cleaned)
+                if ev.get("event_type") != "workflow_end" or i == final_end_idx
+            ]
+
+        # Deduplicate job_state events (old multi-session logs re-emit them)
+        seen_job_states: set[tuple] = set()
+        deduped: List[Dict[str, Any]] = []
+        for ev in cleaned:
+            if ev.get("event_type") == "job_state":
+                key = (ev.get("job_id"), ev.get("state"), ev.get("timestamp"))
+                if key in seen_job_states:
+                    continue
+                seen_job_states.add(key)
+            deduped.append(ev)
+
+        # Sort by timestamp so multi-session events replay in chronological
+        # order.  Use a stable sort; non-job events (jobs_init, workflow_state,
+        # workflow_end) keep their relative position within the same second.
+        deduped.sort(key=lambda ev: ev.get("timestamp", 0))
+
+        self._events = deduped
 
         # Pre-scan for the full job roster (used when no jobs_init event exists)
         self._prescan_jobs = self._prescan_job_roster()

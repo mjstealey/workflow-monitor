@@ -15,6 +15,11 @@ class EventLogger:
 
     Each line is a self-contained JSON object with at minimum:
         {"event_type": "...", "timestamp": <unix_float>, "wf_uuid": "..."}
+
+    If an existing log file is detected for the same workflow, the logger
+    resumes from where it left off — no duplicate header, no re-emitted
+    events — so stop/restart of the monitor produces a single continuous
+    series.
     """
 
     def __init__(
@@ -35,9 +40,61 @@ class EventLogger:
         self._last_wf_state: Optional[str] = None
         self._last_condor_ids: set[str] = set()
         self._jobs_init_emitted: bool = False
+        self._resumed: bool = False
+
+        # Try to resume from an existing log before opening for append
+        self._try_resume()
 
         self._fh = open(self._path, "a")
-        self._write_header()
+
+        if not self._resumed:
+            self._write_header()
+
+    # ── Resume from existing log ──────────────────────────────────────────────
+
+    def _try_resume(self) -> None:
+        """Scan an existing log file to recover state for seamless continuation."""
+        if not self._path.exists() or self._path.stat().st_size == 0:
+            return
+
+        header_uuid: Optional[str] = None
+
+        try:
+            with open(self._path) as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    ev = json.loads(line)
+                    etype = ev.get("event_type")
+
+                    if etype == "workflow_start":
+                        header_uuid = ev.get("wf_uuid")
+
+                    elif etype == "workflow_state":
+                        self._last_wf_state = ev.get("state")
+
+                    elif etype == "job_state":
+                        ts = ev.get("timestamp", 0)
+                        if ts > self._high_water_ts:
+                            self._high_water_ts = ts
+
+                    elif etype == "jobs_init":
+                        self._jobs_init_emitted = True
+
+                    elif etype == "htcondor_poll":
+                        jobs = ev.get("jobs", [])
+                        self._last_condor_ids = {
+                            cj.get("ClusterId", cj.get("DAGNodeName", ""))
+                            for cj in jobs
+                        }
+        except (json.JSONDecodeError, OSError):
+            # Corrupted or unreadable — start fresh
+            return
+
+        # Only resume if the existing log belongs to the same workflow
+        if header_uuid is not None and header_uuid == self._wf_uuid:
+            self._resumed = True
 
     # ── Internal helpers ─────────────────────────────────────────────────────
 
@@ -92,6 +149,10 @@ class EventLogger:
     @property
     def path(self) -> Path:
         return self._path
+
+    @property
+    def resumed(self) -> bool:
+        return self._resumed
 
     # ── Event detection ──────────────────────────────────────────────────────
 
