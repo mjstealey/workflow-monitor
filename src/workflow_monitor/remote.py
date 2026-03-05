@@ -66,39 +66,59 @@ def _parse_remote_spec(spec: str) -> tuple[str, str]:
     return host_part, remote_path
 
 
-def _build_ssh_cmd(
+def _build_ssh_base(
     ssh_config: Optional[str] = None,
     ssh_identity: Optional[str] = None,
-) -> Optional[str]:
-    """Build an ssh command string for rsync -e, or None if no options needed."""
+) -> List[str]:
+    """Build the base SSH command as a list of arguments."""
     parts = ["ssh"]
     if ssh_config:
         parts.extend(["-F", ssh_config])
     if ssh_identity:
         parts.extend(["-i", ssh_identity])
-    if len(parts) == 1:
-        return None
-    return " ".join(parts)
+    return parts
 
 
-def _rsync_file(
-    remote_spec: str,
-    local_path: Path,
-    ssh_cmd: Optional[str] = None,
-) -> bool:
-    """Rsync a single file from the remote host to local_path.
+def _strip_brackets(host: str) -> str:
+    """Strip square brackets from an IPv6 host for SSH.
 
-    Returns True if the sync succeeded, False otherwise.
+    rsync requires brackets (user@[ipv6]:path) but SSH expects the
+    raw address (user@ipv6).
     """
+    # Extract user@ prefix if present
+    if "@" in host:
+        user, addr = host.rsplit("@", 1)
+        addr = addr.strip("[]")
+        return f"{user}@{addr}"
+    return host.strip("[]")
+
+
+def _fetch_file(
+    host: str,
+    remote_path: str,
+    local_path: Path,
+    ssh_base: List[str],
+) -> tuple[bool, str]:
+    """Fetch a remote file via ssh cat.
+
+    Uses ``ssh [opts] host cat remote_path`` which works reliably with
+    ProxyJump, bastion hosts, and IPv6 addresses — unlike rsync which
+    mishandles bracketed IPv6 in the remote-shell handoff.
+
+    Returns (success, stderr_text).
+    """
+    ssh_host = _strip_brackets(host)
+    cmd = ssh_base + [ssh_host, "cat", remote_path]
     try:
-        cmd = ["rsync", "-az", "--timeout=10"]
-        if ssh_cmd:
-            cmd.extend(["-e", ssh_cmd])
-        cmd.extend([remote_spec, str(local_path)])
         result = subprocess.run(cmd, capture_output=True, timeout=60)
-        return result.returncode == 0
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        return False
+        if result.returncode == 0:
+            local_path.write_bytes(result.stdout)
+            return True, ""
+        return False, result.stderr.decode(errors="replace").strip()
+    except subprocess.TimeoutExpired:
+        return False, "ssh timed out"
+    except FileNotFoundError:
+        return False, "ssh not found in PATH"
 
 
 class RemoteEngine:
@@ -119,8 +139,8 @@ class RemoteEngine:
         # Parse and validate remote spec
         self._host, self._remote_path = _parse_remote_spec(remote_spec)
 
-        # Build SSH command for rsync -e
-        self._ssh_cmd = _build_ssh_cmd(ssh_config, ssh_identity)
+        # Build base SSH command
+        self._ssh_base = _build_ssh_base(ssh_config, ssh_identity)
 
         # Local temp file for the synced JSONL
         self._tmpdir = tempfile.mkdtemp(prefix="wfmon-remote-")
@@ -140,9 +160,11 @@ class RemoteEngine:
         self._processed_lines: int = 0
         self._workflow_complete: bool = False
 
-    def _do_sync(self) -> bool:
-        """Rsync the remote file to local temp directory."""
-        return _rsync_file(self._remote_spec, self._local_path, self._ssh_cmd)
+    def _do_sync(self) -> tuple[bool, str]:
+        """Fetch the remote file via SSH."""
+        return _fetch_file(
+            self._host, self._remote_path, self._local_path, self._ssh_base,
+        )
 
     def _load_new_events(self) -> List[Dict[str, Any]]:
         """Read any new lines from the local JSONL file since last read."""
@@ -297,10 +319,15 @@ class RemoteEngine:
         console.print(f"[dim]Connecting to {self._host}...[/dim]")
 
         # Initial sync — must succeed to get header
-        if not self._do_sync():
+        ok, err = self._do_sync()
+        if not ok:
             console.print(
-                f"[bold red]Failed to rsync from {self._remote_spec}[/bold red]\n"
-                "Check that SSH access is configured and the file exists."
+                f"[bold red]Failed to rsync from {self._remote_spec}[/bold red]"
+            )
+            if err:
+                console.print(f"[red]{err}[/red]")
+            console.print(
+                "[dim]Check that SSH access is configured and the file exists.[/dim]"
             )
             return
 
@@ -357,7 +384,7 @@ class RemoteEngine:
                     time.sleep(1.0)
 
                     if time.time() - last_sync >= self._sync_interval:
-                        self._do_sync()
+                        self._do_sync()  # ignore errors during live sync
                         new_events = self._load_new_events()
                         for ev in new_events:
                             self._apply_event(ev)
