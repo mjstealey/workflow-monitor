@@ -306,9 +306,10 @@ class RemoteEngine:
         elif etype == "workflow_end":
             self._wf_state = ev.get("wf_state", self._wf_state)
             self._wf_status = ev.get("wf_status", self._wf_status)
-            if ev.get("wf_state") == "WORKFLOW_TERMINATED" and self._wf_end is None:
-                self._wf_end = ev.get("timestamp")
-            self._workflow_complete = True
+            if ev.get("wf_state") == "WORKFLOW_TERMINATED":
+                if self._wf_end is None:
+                    self._wf_end = ev.get("timestamp")
+                self._workflow_complete = True
 
         # Use header wf_start if not yet set from events
         if self._wf_start is None and self._header_wf_start is not None:
