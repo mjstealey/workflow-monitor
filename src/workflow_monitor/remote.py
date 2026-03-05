@@ -98,26 +98,49 @@ def _fetch_file(
     remote_path: str,
     local_path: Path,
     ssh_base: List[str],
-) -> tuple[bool, str]:
-    """Fetch a remote file via ssh cat.
+    byte_offset: int = 0,
+) -> tuple[bool, str, int]:
+    """Fetch a remote file via SSH, streaming directly to disk.
 
-    Uses ``ssh [opts] host cat remote_path`` which works reliably with
-    ProxyJump, bastion hosts, and IPv6 addresses.
+    When *byte_offset* > 0, uses ``tail -c +<offset>`` to download only
+    new bytes appended since the last fetch.  Falls back to a full
+    download when *byte_offset* is 0 (first fetch) or if the remote file
+    shrank (e.g. server restarted with a new log).
 
-    Returns (success, stderr_text).
+    Returns (success, stderr_text, new_byte_offset).
     """
     ssh_host = _strip_brackets(host)
-    cmd = ssh_base + [ssh_host, "cat", remote_path]
+
+    if byte_offset > 0:
+        # tail -c +N outputs bytes starting at byte N (1-indexed)
+        remote_cmd = f"tail -c +{byte_offset + 1} {remote_path}"
+        write_mode = "ab"
+    else:
+        remote_cmd = f"cat {remote_path}"
+        write_mode = "wb"
+
+    cmd = ssh_base + [ssh_host, remote_cmd]
     try:
-        result = subprocess.run(cmd, capture_output=True, timeout=60)
+        with open(local_path, write_mode) as fh:
+            result = subprocess.run(
+                cmd, stdout=fh, stderr=subprocess.PIPE, timeout=60,
+            )
         if result.returncode == 0:
-            local_path.write_bytes(result.stdout)
-            return True, ""
-        return False, result.stderr.decode(errors="replace").strip()
+            new_size = local_path.stat().st_size
+            return True, "", new_size
+        # On failure with incremental fetch, the local file may have
+        # garbage appended — truncate back to the previous offset.
+        if byte_offset > 0:
+            with open(local_path, "ab") as fh:
+                fh.truncate(byte_offset)
+        return False, result.stderr.decode(errors="replace").strip(), byte_offset
     except subprocess.TimeoutExpired:
-        return False, "ssh timed out"
+        if byte_offset > 0:
+            with open(local_path, "ab") as fh:
+                fh.truncate(byte_offset)
+        return False, "ssh timed out", byte_offset
     except FileNotFoundError:
-        return False, "ssh not found in PATH"
+        return False, "ssh not found in PATH", byte_offset
 
 
 class RemoteEngine:
@@ -146,6 +169,9 @@ class RemoteEngine:
         filename = Path(self._remote_path).name
         self._local_path = Path(self._tmpdir) / filename
 
+        # Incremental fetch state (byte offset into the remote file)
+        self._remote_offset: int = 0
+
         # Replay state
         self._info: Optional[WorkflowInfo] = None
         self._job_state: Dict[int, Dict[str, Any]] = {}
@@ -160,10 +186,19 @@ class RemoteEngine:
         self._workflow_complete: bool = False
 
     def _do_sync(self) -> tuple[bool, str]:
-        """Fetch the remote file via SSH."""
-        return _fetch_file(
+        """Fetch the remote file via SSH (incremental after first sync)."""
+        ok, err, new_offset = _fetch_file(
             self._host, self._remote_path, self._local_path, self._ssh_base,
+            byte_offset=self._remote_offset,
         )
+        if ok:
+            # If the file shrank (server restarted), re-fetch from scratch
+            if new_offset < self._remote_offset:
+                self._remote_offset = 0
+                self._processed_lines = 0
+                return self._do_sync()
+            self._remote_offset = new_offset
+        return ok, err
 
     def _load_new_events(self) -> List[Dict[str, Any]]:
         """Read any new lines from the local JSONL file since last read."""
