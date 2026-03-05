@@ -299,7 +299,7 @@ The PID file is written alongside the log file with a `.pid` extension (e.g., `w
 
 ### Client
 
-The client fetches the JSONL log from a remote machine via SSH and displays it in the TUI. The header shows an `SSH` badge with the remote host.
+The client fetches the JSONL log from a remote machine via SSH and displays it in the TUI. The header shows an `SSH` badge with the remote host. After the initial full download, only new bytes are transferred each sync cycle using incremental byte-offset fetching (`tail -c +N`), minimizing bandwidth and memory usage.
 
 ```bash
 # Basic usage
@@ -406,10 +406,10 @@ In client/server mode, the data flows through a JSONL log file:
 │  condor_q ──-──┘         (--serve)                           │
 │                                                              │
 └──────────────────────────────┬───────────────────────────────┘
-                               │ SSH (ssh cat)
+                               │ SSH (incremental tail -c / cat)
 ┌──────────────────────────────▼───────────────────────────────┐
 │                                                              │
-│  client (--remote) ──▶ Rich TUI  [SSH badge]           │
+│  client (--remote) ──▶ Rich TUI  [SSH badge]                 │
 │                                                              │
 └─────────────────────── Client machine ───────────────────────┘
 ```
@@ -433,7 +433,7 @@ JSONL replay engine. Loads an event log, reconstructs workflow snapshots progres
 Headless server daemon for client/server mode. Runs the same polling loop as the live monitor but without a terminal UI, writing JSONL events continuously. Daemonizes via double-fork to survive terminal disconnection. Writes a PID file for lifecycle management.
 
 ### `remote.py`
-SSH client engine for client/server mode. Periodically fetches the remote JSONL log via `ssh cat`, incrementally processes new events, and drives the Rich TUI with an `SSH` badge. Handles IPv6 addresses and custom SSH configurations (config files, identity keys, bastion hosts).
+SSH client engine for client/server mode. Periodically fetches the remote JSONL log via SSH, incrementally processes new events, and drives the Rich TUI with an `SSH` badge. Uses incremental byte-offset fetching — after the first full download, subsequent syncs use `tail -c +<offset>` to transfer only newly appended bytes, streaming directly to disk with near-zero memory overhead. Falls back to a full re-fetch if the remote file shrinks (e.g., server restarted with a new log). Handles IPv6 addresses and custom SSH configurations (config files, identity keys, bastion hosts).
 
 ### `display.py`
 Builds and drives the Rich terminal dashboard. In live mode (`without --once`), renders inside a `rich.live.Live` context that refreshes every `--interval` seconds. Exits automatically when `WORKFLOW_TERMINATED` is observed in the database. When `--log` is active, feeds each refresh cycle to the `EventLogger`. Supports mode badges: `REPLAY` for replay mode, `SSH` for remote client mode.
