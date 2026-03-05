@@ -285,7 +285,7 @@ def _make_infra_summary(snap: WorkflowSnapshot) -> Panel:
     if not counts:
         table.add_row("(none)", "", "")
 
-    return Panel(table, title="[bold]Infrastructure[/bold]", padding=(0, 0))
+    return Panel(table, title="[bold]Auxiliary Jobs[/bold]", padding=(0, 0))
 
 
 # ─── Full layout assembly ─────────────────────────────────────────────────────
