@@ -36,13 +36,15 @@ A real-time terminal dashboard for monitoring running [Pegasus WMS](https://pega
 - **Non-interactive mode** — `--once` for scripting, CI, or quick status checks
 - **Event logging** — `--log` captures every workflow and job state transition to a JSONL file for replay or post-hoc analysis
 - **Replay mode** — `--replay` reads a JSONL event log and visually replays the workflow in the TUI at configurable speed (`--speed`)
+- **Client/Server mode** — `--serve` runs a headless daemon on the workflow machine that logs events continuously; `--remote` connects from any machine via SSH to display the workflow in the TUI
 
 ## Requirements
 
 - Python 3.9+
 - [uv](https://docs.astral.sh/uv/) package manager
-- A planned and running (or completed) Pegasus workflow (not needed for `--replay`)
-- HTCondor with `condor_q` on `PATH` (for live queue data; not needed for `--replay`)
+- A planned and running (or completed) Pegasus workflow (not needed for `--replay` or `--remote`)
+- HTCondor with `condor_q` on `PATH` (for live queue data; not needed for `--replay` or `--remote`)
+- SSH access to the remote host (for `--remote` client mode only)
 
 ## Installation
 
@@ -89,6 +91,21 @@ uv run workflow-monitor --replay example-logs/workflow-events.jsonl
 
 # Replay at 4x speed
 uv run workflow-monitor --replay example-logs/workflow-events.jsonl --speed 4
+
+# Start a headless server on the workflow machine (daemonizes, survives terminal exit)
+uv run workflow-monitor --serve /path/to/diamond-workflow
+
+# Monitor a remote workflow via SSH from another machine
+uv run workflow-monitor --remote user@host:/path/to/submit_dir/workflow-events.jsonl
+
+# Remote monitoring with SSH config and identity file (e.g. FABRIC testbed)
+uv run workflow-monitor \
+  --remote 'ubuntu@[2001:db8::1]:/home/ubuntu/pegasus/earthquake/run0001/workflow-events.jsonl' \
+  --ssh-config ~/.ssh/fabric-ssh-config \
+  --ssh-identity ~/.ssh/my-sliver-key
+
+# Stop a running server daemon
+uv run workflow-monitor --stop-server /path/to/diamond-workflow
 ```
 
 ### With the example diamond workflow
@@ -114,7 +131,10 @@ uv run workflow-monitor /path/to/pegasus-macos-local/diamond-workflow
 ```
 usage: workflow-monitor [-h] [--version] [--interval SECONDS] [--all-jobs]
                         [--events N] [--once] [--log [PATH]] [--replay PATH]
-                        [--speed MULTIPLIER] [--schedd NAME]
+                        [--speed MULTIPLIER] [--serve] [--serve-foreground]
+                        [--stop-server [PID_FILE]] [--remote USER@HOST:/PATH]
+                        [--sync-interval SECONDS] [--ssh-config PATH]
+                        [--ssh-identity PATH] [--schedd NAME]
                         [--collector HOST[:PORT]] [--token PATH] [--cert PATH]
                         [--key PATH] [--password-file PATH]
                         [TARGET]
@@ -184,8 +204,8 @@ A table of individual jobs with:
 | **Duration** | Wall time from `EXECUTE` to `JOB_TERMINATED`; updates live for running jobs |
 | **Live (Condor)** | Real-time HTCondor queue status (`Idle`, `Running`, `Held`, etc.) |
 
-### Infrastructure
-A compact summary of non-compute jobs grouped by type and state. Hidden when no infrastructure jobs have been seen yet.
+### Auxiliary Jobs
+A compact summary of non-compute jobs (stage-in/out, directory creation, cleanup, registration) grouped by type and state. Hidden when no auxiliary jobs have been seen yet.
 
 ### Recent Events
 A chronological list of the most recent job-state transitions. Each row shows the time, job name, and raw Pegasus event name. The number of rows is controlled by `--events`.
@@ -236,6 +256,118 @@ uv run workflow-monitor --replay example-logs/workflow-events.jsonl --all-jobs
 
 The header displays a `REPLAY` badge and the current speed multiplier. Events are grouped by timestamp and paced according to the original timing, scaled by `--speed`. Press `Ctrl+C` to exit early.
 
+## Client/Server mode
+
+Client/Server mode allows you to monitor a Pegasus workflow running on a remote machine from your local workstation. The **server** runs headless on the workflow machine and writes a JSONL event log continuously. The **client** runs on your local machine, periodically fetches the log via SSH, and displays the workflow in the TUI.
+
+The client can connect and disconnect at any time without affecting the workflow or the server. When the client reconnects, it catches up to the current state automatically.
+
+### Server
+
+The server is a headless daemon that polls the stampede database and HTCondor queue, writing events to a JSONL log file — the same format as `--log` mode, but without a terminal UI.
+
+```bash
+# Start the server (daemonizes, survives terminal exit)
+uv run workflow-monitor --serve /path/to/workflow
+
+# Start with a custom log path
+uv run workflow-monitor --serve --log /tmp/my-events.jsonl /path/to/workflow
+
+# Start with a custom poll interval
+uv run workflow-monitor --serve --interval 5 /path/to/workflow
+
+# Run in the foreground (useful for debugging; Ctrl+C to stop)
+uv run workflow-monitor --serve-foreground /path/to/workflow
+
+# Stop a running server
+uv run workflow-monitor --stop-server /path/to/workflow
+
+# Stop using an explicit PID file
+uv run workflow-monitor --stop-server /path/to/workflow-events.pid
+```
+
+When `--serve` is used, the monitor:
+
+1. Locates the workflow (same as normal mode)
+2. Prints the log file path and PID file location
+3. Double-forks to detach from the terminal (daemonize)
+4. Polls the stampede database at `--interval` and writes events to the JSONL log
+5. Exits automatically when the workflow completes, writing a final `workflow_end` event
+6. Cleans up the PID file on exit
+
+The PID file is written alongside the log file with a `.pid` extension (e.g., `workflow-events.pid`). It is used by `--stop-server` to send `SIGTERM` to the daemon.
+
+### Client
+
+The client fetches the JSONL log from a remote machine via SSH and displays it in the TUI. The header shows an `SSH/RSYNC` badge with the remote host.
+
+```bash
+# Basic usage
+uv run workflow-monitor --remote user@host:/path/to/workflow-events.jsonl
+
+# With custom sync interval (default: 5 seconds)
+uv run workflow-monitor --remote user@host:/path/to/events.jsonl --sync-interval 10
+
+# Show all job types
+uv run workflow-monitor --remote user@host:/path/to/events.jsonl --all-jobs
+```
+
+### SSH configuration
+
+For hosts that require specific SSH settings (config files, identity keys, bastion/jump hosts), use `--ssh-config` and `--ssh-identity`:
+
+```bash
+uv run workflow-monitor \
+  --remote 'ubuntu@[2001:db8::1]:/home/ubuntu/pegasus/earthquake/run0001/workflow-events.jsonl' \
+  --ssh-config ~/.ssh/my-ssh-config \
+  --ssh-identity ~/.ssh/my-private-key
+```
+
+These flags are passed directly to `ssh -F` and `ssh -i` respectively, so any SSH config features are supported — including `ProxyJump` for bastion hosts, `StrictHostKeyChecking`, and `ServerAliveInterval`.
+
+**IPv6 addresses** must be enclosed in square brackets in the remote spec (e.g., `user@[2001:db8::1]:/path`). The brackets are stripped automatically before passing to SSH.
+
+#### Example: FABRIC testbed
+
+[FABRIC](https://fabric-testbed.net/) uses a bastion host with ProxyJump. A typical SSH config (`~/.ssh/fabric-ssh-config`):
+
+```
+UserKnownHostsFile /dev/null
+StrictHostKeyChecking no
+ServerAliveInterval 120
+
+Host bastion.fabric-testbed.net
+     User your-fabric-username
+     ForwardAgent yes
+     Hostname %h
+     IdentityFile ~/.ssh/fabric-bastion-key
+     IdentitiesOnly yes
+
+Host * !bastion.fabric-testbed.net
+     ProxyJump your-fabric-username@bastion.fabric-testbed.net:22
+```
+
+Monitor command:
+
+```bash
+uv run workflow-monitor \
+  --remote 'ubuntu@[2001:400:a100:3030:f816:3eff:fe0b:f146]:/home/ubuntu/earthquake-workflow/ubuntu/pegasus/earthquake/run0002/workflow-events.jsonl' \
+  --ssh-config ~/.ssh/fabric-ssh-config \
+  --ssh-identity ~/.ssh/pegasusai-sliver
+```
+
+### Client/Server options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--serve` | off | Run as a headless server daemon. Daemonizes and survives terminal exit. |
+| `--serve-foreground` | off | Run the server in the foreground (for debugging). |
+| `--stop-server [PID_FILE]` | — | Stop a running server daemon. If `PID_FILE` is omitted, locates it from the workflow target. |
+| `--remote USER@HOST:/PATH` | — | Monitor a remote workflow via SSH. No local Pegasus or HTCondor required. |
+| `--sync-interval SECONDS` | `5.0` | How often the client fetches the remote log file. |
+| `--ssh-config PATH` | — | SSH config file passed as `ssh -F <PATH>`. |
+| `--ssh-identity PATH` | — | SSH identity/key file passed as `ssh -i <PATH>`. |
+
 ## Job states
 
 | Display state | Meaning |
@@ -264,6 +396,24 @@ Pegasus workflow run
         └── condor_q / htcondor    ← live HTCondor queue (Python bindings or subprocess)
 ```
 
+In client/server mode, the data flows through a JSONL log file:
+
+```
+┌─────────────────────── Server machine ───────────────────────┐
+│                                                              │
+│  stampede.db ──┐                                             │
+│                ├──▶ server daemon ──▶ workflow-events.jsonl   │
+│  condor_q ────┘         (--serve)                            │
+│                                                              │
+└──────────────────────────────┬───────────────────────────────┘
+                               │ SSH (ssh cat)
+┌──────────────────────────────▼───────────────────────────────┐
+│                                                              │
+│  client (--remote) ──▶ Rich TUI  [SSH/RSYNC badge]           │
+│                                                              │
+└─────────────────────── Client machine ───────────────────────┘
+```
+
 ### `braindump.py`
 Locates and parses `braindump.yml` from any of the three accepted `TARGET` forms. Provides paths to all workflow artifacts.
 
@@ -279,8 +429,14 @@ JSONL event logger for workflow replay. When `--log` is active, captures workflo
 ### `replay.py`
 JSONL replay engine. Loads an event log, reconstructs workflow snapshots progressively frame-by-frame, and drives the Rich TUI at configurable speed. No database or HTCondor connection required.
 
+### `server.py`
+Headless server daemon for client/server mode. Runs the same polling loop as the live monitor but without a terminal UI, writing JSONL events continuously. Daemonizes via double-fork to survive terminal disconnection. Writes a PID file for lifecycle management.
+
+### `remote.py`
+SSH client engine for client/server mode. Periodically fetches the remote JSONL log via `ssh cat`, incrementally processes new events, and drives the Rich TUI with an `SSH/RSYNC` badge. Handles IPv6 addresses and custom SSH configurations (config files, identity keys, bastion hosts).
+
 ### `display.py`
-Builds and drives the Rich terminal dashboard. In live mode (`without --once`), renders inside a `rich.live.Live` context that refreshes every `--interval` seconds. Exits automatically when `WORKFLOW_TERMINATED` is observed in the database. When `--log` is active, feeds each refresh cycle to the `EventLogger`.
+Builds and drives the Rich terminal dashboard. In live mode (`without --once`), renders inside a `rich.live.Live` context that refreshes every `--interval` seconds. Exits automatically when `WORKFLOW_TERMINATED` is observed in the database. When `--log` is active, feeds each refresh cycle to the `EventLogger`. Supports mode badges: `REPLAY` for replay mode, `SSH/RSYNC` for remote client mode.
 
 ![terminal dashboard](./images/terminal-dashboard.png)
 
