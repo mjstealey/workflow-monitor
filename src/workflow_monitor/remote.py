@@ -1,7 +1,7 @@
-"""SSH/rsync client engine for remote workflow monitoring.
+"""SSH client engine for remote workflow monitoring.
 
-Periodically rsyncs a JSONL event log from a remote server and displays
-it in the Rich TUI, following new events as they arrive.
+Periodically fetches a JSONL event log from a remote server via SSH and
+displays it in the Rich TUI, following new events as they arrive.
 
 Usage (from cli.py):
     workflow-monitor --remote user@host:/path/to/workflow-events.jsonl
@@ -82,8 +82,8 @@ def _build_ssh_base(
 def _strip_brackets(host: str) -> str:
     """Strip square brackets from an IPv6 host for SSH.
 
-    rsync requires brackets (user@[ipv6]:path) but SSH expects the
-    raw address (user@ipv6).
+    Remote specs use brackets for IPv6 (user@[ipv6]:path) but SSH
+    expects the raw address (user@ipv6).
     """
     # Extract user@ prefix if present
     if "@" in host:
@@ -102,8 +102,7 @@ def _fetch_file(
     """Fetch a remote file via ssh cat.
 
     Uses ``ssh [opts] host cat remote_path`` which works reliably with
-    ProxyJump, bastion hosts, and IPv6 addresses — unlike rsync which
-    mishandles bracketed IPv6 in the remote-shell handoff.
+    ProxyJump, bastion hosts, and IPv6 addresses.
 
     Returns (success, stderr_text).
     """
@@ -322,7 +321,7 @@ class RemoteEngine:
         ok, err = self._do_sync()
         if not ok:
             console.print(
-                f"[bold red]Failed to rsync from {self._remote_spec}[/bold red]"
+                f"[bold red]Failed to fetch from {self._remote_spec}[/bold red]"
             )
             if err:
                 console.print(f"[red]{err}[/red]")
@@ -350,7 +349,7 @@ class RemoteEngine:
         remote_info = {"host": self._host}
 
         console.print(
-            f"[dim]Monitoring {info.dax_label} via SSH/RSYNC "
+            f"[dim]Monitoring {info.dax_label} via SSH "
             f"(sync every {self._sync_interval:.0f}s)[/dim]"
         )
 

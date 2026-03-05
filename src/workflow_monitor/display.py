@@ -67,7 +67,7 @@ def _make_header(
         title.append(f" {speed_str}", style="bold dark_orange3")
     elif remote_info is not None:
         title.append("  ")
-        title.append(" SSH/RSYNC ", style="bold white on blue")
+        title.append(" SSH ", style="bold white on blue")
         host = remote_info.get("host", "")
         if host:
             title.append(f" {host}", style="bold blue")

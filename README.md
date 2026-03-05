@@ -299,7 +299,7 @@ The PID file is written alongside the log file with a `.pid` extension (e.g., `w
 
 ### Client
 
-The client fetches the JSONL log from a remote machine via SSH and displays it in the TUI. The header shows an `SSH/RSYNC` badge with the remote host.
+The client fetches the JSONL log from a remote machine via SSH and displays it in the TUI. The header shows an `SSH` badge with the remote host.
 
 ```bash
 # Basic usage
@@ -334,17 +334,17 @@ These flags are passed directly to `ssh -F` and `ssh -i` respectively, so any SS
 ```
 UserKnownHostsFile /dev/null
 StrictHostKeyChecking no
-ServerAliveInterval 120
+ServerAliveInterval 120 
 
 Host bastion.fabric-testbed.net
-     User your-fabric-username
+     User <FABRIC_BASTION_USERNAME>
      ForwardAgent yes
      Hostname %h
-     IdentityFile ~/.ssh/fabric-bastion-key
+     IdentityFile <FABRIC_BASTION_PRIVATE_KEY_LOCATION>
      IdentitiesOnly yes
 
 Host * !bastion.fabric-testbed.net
-     ProxyJump your-fabric-username@bastion.fabric-testbed.net:22
+     ProxyJump <FABRIC_BASTION_USERNAME>@bastion.fabric-testbed.net:22
 ```
 
 Monitor command:
@@ -402,14 +402,14 @@ In client/server mode, the data flows through a JSONL log file:
 ┌─────────────────────── Server machine ───────────────────────┐
 │                                                              │
 │  stampede.db ──┐                                             │
-│                ├──▶ server daemon ──▶ workflow-events.jsonl   │
-│  condor_q ────┘         (--serve)                            │
+│                ├──▶ server daemon ──▶ workflow-events.jsonl  │
+│  condor_q ──-──┘         (--serve)                           │
 │                                                              │
 └──────────────────────────────┬───────────────────────────────┘
                                │ SSH (ssh cat)
 ┌──────────────────────────────▼───────────────────────────────┐
 │                                                              │
-│  client (--remote) ──▶ Rich TUI  [SSH/RSYNC badge]           │
+│  client (--remote) ──▶ Rich TUI  [SSH badge]           │
 │                                                              │
 └─────────────────────── Client machine ───────────────────────┘
 ```
@@ -433,10 +433,10 @@ JSONL replay engine. Loads an event log, reconstructs workflow snapshots progres
 Headless server daemon for client/server mode. Runs the same polling loop as the live monitor but without a terminal UI, writing JSONL events continuously. Daemonizes via double-fork to survive terminal disconnection. Writes a PID file for lifecycle management.
 
 ### `remote.py`
-SSH client engine for client/server mode. Periodically fetches the remote JSONL log via `ssh cat`, incrementally processes new events, and drives the Rich TUI with an `SSH/RSYNC` badge. Handles IPv6 addresses and custom SSH configurations (config files, identity keys, bastion hosts).
+SSH client engine for client/server mode. Periodically fetches the remote JSONL log via `ssh cat`, incrementally processes new events, and drives the Rich TUI with an `SSH` badge. Handles IPv6 addresses and custom SSH configurations (config files, identity keys, bastion hosts).
 
 ### `display.py`
-Builds and drives the Rich terminal dashboard. In live mode (`without --once`), renders inside a `rich.live.Live` context that refreshes every `--interval` seconds. Exits automatically when `WORKFLOW_TERMINATED` is observed in the database. When `--log` is active, feeds each refresh cycle to the `EventLogger`. Supports mode badges: `REPLAY` for replay mode, `SSH/RSYNC` for remote client mode.
+Builds and drives the Rich terminal dashboard. In live mode (`without --once`), renders inside a `rich.live.Live` context that refreshes every `--interval` seconds. Exits automatically when `WORKFLOW_TERMINATED` is observed in the database. When `--log` is active, feeds each refresh cycle to the `EventLogger`. Supports mode badges: `REPLAY` for replay mode, `SSH` for remote client mode.
 
 ![terminal dashboard](./images/terminal-dashboard.png)
 

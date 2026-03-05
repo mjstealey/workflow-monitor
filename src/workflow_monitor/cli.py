@@ -96,7 +96,7 @@ def build_parser() -> argparse.ArgumentParser:
     cs = p.add_argument_group(
         "Client/Server mode",
         "Run a headless server that logs events, or a remote client that "
-        "syncs and displays via SSH/rsync.",
+        "syncs and displays via SSH.",
     )
     cs.add_argument(
         "--serve",
@@ -122,14 +122,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--remote",
         metavar="USER@HOST:/PATH",
         default=None,
-        help="Monitor a remote workflow via SSH/rsync (e.g. user@host:/path/to/workflow-events.jsonl)",
+        help="Monitor a remote workflow via SSH (e.g. user@host:/path/to/workflow-events.jsonl)",
     )
     cs.add_argument(
         "--sync-interval",
         type=float,
         default=5.0,
         metavar="SECONDS",
-        help="How often the remote client rsyncs the log file (default: 5.0)",
+        help="How often the remote client fetches the log file (default: 5.0)",
     )
     cs.add_argument(
         "--ssh-config",
