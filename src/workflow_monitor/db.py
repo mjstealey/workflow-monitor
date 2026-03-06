@@ -24,6 +24,7 @@ _STATE_MAP: Dict[str, str] = {
     "POST_SCRIPT_TERMINATED": "POST",
     "JOB_TERMINATED": "DONE",
     "JOB_HELD": "HELD",
+    "JOB_EVICTED": "HELD",
 }
 
 # Rich color per display state
@@ -170,6 +171,15 @@ class WorkflowSnapshot:
 
     def failed_count(self) -> int:
         return sum(1 for j in self.jobs if j.disp_state == "FAILED")
+
+    def held_count(self) -> int:
+        return sum(1 for j in self.jobs if j.disp_state == "HELD")
+
+    def held_jobs(self) -> List[JobRecord]:
+        return [j for j in self.jobs if j.disp_state == "HELD"]
+
+    def failed_jobs(self) -> List[JobRecord]:
+        return [j for j in self.jobs if j.disp_state == "FAILED"]
 
     def running_count(self) -> int:
         return sum(1 for j in self.jobs if j.disp_state == "RUNNING")

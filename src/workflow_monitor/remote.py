@@ -184,6 +184,7 @@ class RemoteEngine:
         self._prescan_jobs: Dict[int, Dict[str, str]] = {}
         self._processed_lines: int = 0
         self._workflow_complete: bool = False
+        self._condor_jobs: Optional[List[Dict]] = None
 
     def _do_sync(self) -> tuple[bool, str]:
         """Fetch the remote file via SSH (incremental after first sync)."""
@@ -303,6 +304,9 @@ class RemoteEngine:
                     "timestamp": ts,
                 })
 
+        elif etype == "htcondor_poll":
+            self._condor_jobs = ev.get("jobs")
+
         elif etype == "workflow_end":
             self._wf_state = ev.get("wf_state", self._wf_state)
             self._wf_status = ev.get("wf_status", self._wf_status)
@@ -404,7 +408,7 @@ class RemoteEngine:
                     # Update display with current state
                     snap = self._build_snapshot()
                     layout = build_layout(
-                        info, snap, show_all, None,
+                        info, snap, show_all, self._condor_jobs,
                         self._events_n, snap.poll_time,
                         remote_info=remote_info,
                     )

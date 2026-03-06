@@ -73,7 +73,7 @@ def _try_python_bindings(
             projection = [
                 "ClusterId", "ProcId", "JobStatus",
                 "Cmd", "RemoteHost", "QDate", "DAGNodeName",
-                "Owner",
+                "Owner", "HoldReason", "HoldReasonCode",
             ]
             q_args: Dict[str, Any] = {"projection": projection}
             if constraint:
