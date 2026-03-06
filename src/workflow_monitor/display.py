@@ -72,6 +72,9 @@ def _make_header(
         host = remote_info.get("host", "")
         if host:
             title.append(f" {host}", style="bold blue")
+    else:
+        title.append("  ")
+        title.append(" LIVE ", style="bold white on green")
 
     right_col = Text(no_wrap=True)
     if replay_info is not None or remote_info is not None:
