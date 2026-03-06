@@ -50,12 +50,13 @@ def _make_header(
     snap: WorkflowSnapshot,
     refresh_ts: float,
     replay_info: Optional[dict] = None,
+    remote_info: Optional[dict] = None,
 ) -> Panel:
     grid = Table.grid(expand=True, padding=(0, 0))
     grid.add_column(ratio=1)
     grid.add_column(justify="right", no_wrap=True)
 
-    # Row 1: title + refresh/replay badge
+    # Row 1: title + mode badge
     title = Text()
     title.append("Pegasus Workflow Monitor", style="bold white")
     if replay_info is not None:
@@ -64,9 +65,15 @@ def _make_header(
         speed = replay_info.get("speed", 1.0)
         speed_str = f"{speed:g}x" if speed != int(speed) else f"{int(speed)}x"
         title.append(f" {speed_str}", style="bold dark_orange3")
+    elif remote_info is not None:
+        title.append("  ")
+        title.append(" SSH ", style="bold white on blue")
+        host = remote_info.get("host", "")
+        if host:
+            title.append(f" {host}", style="bold blue")
 
     right_col = Text(no_wrap=True)
-    if replay_info is not None:
+    if replay_info is not None or remote_info is not None:
         right_col.append(
             datetime.fromtimestamp(refresh_ts).strftime("%H:%M:%S"), style="dim white"
         )
@@ -278,7 +285,7 @@ def _make_infra_summary(snap: WorkflowSnapshot) -> Panel:
     if not counts:
         table.add_row("(none)", "", "")
 
-    return Panel(table, title="[bold]Infrastructure[/bold]", padding=(0, 0))
+    return Panel(table, title="[bold]Auxiliary Jobs[/bold]", padding=(0, 0))
 
 
 # ─── Full layout assembly ─────────────────────────────────────────────────────
@@ -291,6 +298,7 @@ def build_layout(
     events_n: int,
     refresh_ts: float,
     replay_info: Optional[dict] = None,
+    remote_info: Optional[dict] = None,
 ) -> Layout:
     layout = Layout()
     layout.split_column(
@@ -304,7 +312,7 @@ def build_layout(
         Layout(name="infra", ratio=1),
     )
 
-    layout["header"].update(_make_header(info, snap, refresh_ts, replay_info=replay_info))
+    layout["header"].update(_make_header(info, snap, refresh_ts, replay_info=replay_info, remote_info=remote_info))
     layout["status"].update(_make_status_bar(snap))
     layout["jobs"].update(_make_job_table(snap, show_all=show_all, condor_jobs=condor_jobs))
     layout["infra"].update(_make_infra_summary(snap))

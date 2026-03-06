@@ -92,6 +92,58 @@ def build_parser() -> argparse.ArgumentParser:
         help="Replay speed multiplier (default: 1.0, e.g. 4 = 4x speed)",
     )
 
+    # ── Client/Server mode ───────────────────────────────────────────────────
+    cs = p.add_argument_group(
+        "Client/Server mode",
+        "Run a headless server that logs events, or a remote client that "
+        "syncs and displays via SSH.",
+    )
+    cs.add_argument(
+        "--serve",
+        action="store_true",
+        default=False,
+        help="Run as a headless server daemon (daemonizes, survives terminal exit)",
+    )
+    cs.add_argument(
+        "--serve-foreground",
+        action="store_true",
+        default=False,
+        help="Run the server in the foreground (for debugging; Ctrl+C to stop)",
+    )
+    cs.add_argument(
+        "--stop-server",
+        nargs="?",
+        const="auto",
+        default=None,
+        metavar="PID_FILE",
+        help="Stop a running server daemon (reads PID from .pid file next to the log)",
+    )
+    cs.add_argument(
+        "--remote",
+        metavar="USER@HOST:/PATH",
+        default=None,
+        help="Monitor a remote workflow via SSH (e.g. user@host:/path/to/workflow-events.jsonl)",
+    )
+    cs.add_argument(
+        "--sync-interval",
+        type=float,
+        default=5.0,
+        metavar="SECONDS",
+        help="How often the remote client fetches the log file (default: 5.0)",
+    )
+    cs.add_argument(
+        "--ssh-config",
+        metavar="PATH",
+        default=None,
+        help="SSH config file for --remote (passed as ssh -F <PATH>)",
+    )
+    cs.add_argument(
+        "--ssh-identity",
+        metavar="PATH",
+        default=None,
+        help="SSH identity/key file for --remote (passed as ssh -i <PATH>)",
+    )
+
     # ── HTCondor options ─────────────────────────────────────────────────────
     condor = p.add_argument_group("HTCondor options")
     condor.add_argument(
@@ -158,6 +210,47 @@ def main(argv: list | None = None) -> int:
             return 1
         return 0
 
+    # ── Remote client mode ────────────────────────────────────────────────────
+    if args.remote is not None:
+        from .remote import RemoteEngine
+
+        try:
+            engine = RemoteEngine(
+                args.remote,
+                sync_interval=args.sync_interval,
+                events_n=args.events,
+                ssh_config=args.ssh_config,
+                ssh_identity=args.ssh_identity,
+            )
+            engine.run(show_all=args.all_jobs)
+        except (ValueError, json.JSONDecodeError) as exc:
+            print(f"[error] {exc}", file=sys.stderr)
+            return 1
+        return 0
+
+    # ── Stop server ───────────────────────────────────────────────────────────
+    if args.stop_server is not None:
+        from .server import stop_server
+
+        if args.stop_server == "auto":
+            # Locate workflow to find default log path
+            target = Path(args.target)
+            try:
+                info = load_braindump(target)
+            except FileNotFoundError as exc:
+                print(f"[error] {exc}", file=sys.stderr)
+                return 1
+            pid_file = (info.submit_dir / "workflow-events.pid")
+        else:
+            pid_file = Path(args.stop_server)
+
+        if stop_server(pid_file):
+            print(f"Server stopped (PID file: {pid_file})")
+            return 0
+        else:
+            print(f"[error] Could not stop server (PID file: {pid_file})", file=sys.stderr)
+            return 1
+
     target = Path(args.target)
 
     # ── Locate workflow ───────────────────────────────────────────────────────
@@ -199,6 +292,21 @@ def main(argv: list | None = None) -> int:
             log_path = info.submit_dir / "workflow-events.jsonl"
         else:
             log_path = Path(args.log)
+
+    # ── Serve mode (headless daemon) ─────────────────────────────────────────
+    if args.serve or args.serve_foreground:
+        from .server import run_server
+
+        with StampedeDB(db_path) as db:
+            run_server(
+                info=info,
+                db=db,
+                poll_interval=args.interval,
+                log_path=log_path,
+                condor_kwargs=condor_kwargs,
+                foreground=args.serve_foreground,
+            )
+        return 0
 
     # ── Run monitor ───────────────────────────────────────────────────────────
     with StampedeDB(db_path) as db:
