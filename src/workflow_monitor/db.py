@@ -15,7 +15,9 @@ _STATE_MAP: Dict[str, str] = {
     "POST_SCRIPT_SUCCESS": "SUCCESS",
     "JOB_SUCCESS": "SUCCESS",
     "POST_SCRIPT_FAILURE": "FAILED",
+    "POST_SCRIPT_FAILED": "FAILED",
     "JOB_FAILURE": "FAILED",
+    "JOB_FAILED": "FAILED",
     "EXECUTE": "RUNNING",
     "SUBMIT": "QUEUED",
     "PRE_SCRIPT_STARTED": "PRE",
@@ -75,6 +77,15 @@ def fmt_timestamp(ts: Optional[float]) -> str:
     if ts is None:
         return "-"
     return datetime.fromtimestamp(ts).strftime("%H:%M:%S")
+
+
+def real_exitcode(raw: Optional[int]) -> Optional[int]:
+    """Convert raw wait status to real exit code."""
+    if raw is None:
+        return None
+    if raw > 128:
+        return raw >> 8
+    return raw
 
 
 # ─── Data classes ─────────────────────────────────────────────────────────────
