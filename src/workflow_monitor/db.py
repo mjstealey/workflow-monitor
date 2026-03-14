@@ -351,7 +351,8 @@ class StampedeDB:
                 j.type_desc,
                 js.state,
                 js.timestamp,
-                j.job_id
+                j.job_id,
+                ji.exitcode
             FROM job j
             JOIN job_instance ji ON j.job_id = ji.job_id
             JOIN jobstate js ON ji.job_instance_id = js.job_instance_id

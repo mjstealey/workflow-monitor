@@ -41,14 +41,19 @@ def _daemonize(pid_file: Path) -> None:
         sys.exit(0)
 
     # Grandchild — the actual daemon
-    # Redirect standard file descriptors to /dev/null
+    # Redirect stdin to /dev/null; redirect stdout/stderr to a log file
+    # next to the PID file so daemon errors are diagnosable.
     sys.stdout.flush()
     sys.stderr.flush()
     devnull = os.open(os.devnull, os.O_RDWR)
-    os.dup2(devnull, 0)
-    os.dup2(devnull, 1)
-    os.dup2(devnull, 2)
+    os.dup2(devnull, 0)  # stdin
     os.close(devnull)
+
+    daemon_log = str(pid_file) + ".log"
+    log_fd = os.open(daemon_log, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+    os.dup2(log_fd, 1)  # stdout
+    os.dup2(log_fd, 2)  # stderr
+    os.close(log_fd)
 
     # Write PID file
     pid_file.write_text(str(os.getpid()))
@@ -135,6 +140,10 @@ def run_server(
                 break
 
             time.sleep(poll_interval)
+    except Exception as exc:
+        import traceback
+        traceback.print_exc()
+        print(f"Server error: {exc}", file=sys.stderr)
     finally:
         if snap is not None:
             logger.close(snap)
