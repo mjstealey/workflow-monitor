@@ -222,7 +222,7 @@ def main(argv: list | None = None) -> int:
                 ssh_config=args.ssh_config,
                 ssh_identity=args.ssh_identity,
             )
-            engine.run(show_all=args.all_jobs)
+            engine.run(show_all=args.all_jobs, once=args.once)
         except (ValueError, json.JSONDecodeError) as exc:
             print(f"[error] {exc}", file=sys.stderr)
             return 1

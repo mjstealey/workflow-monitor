@@ -26,7 +26,9 @@ from .db import (
     WorkflowSnapshot,
     fmt_duration,
     fmt_timestamp,
+    real_exitcode,
 )
+from .diagnostics import collect_diagnostics
 from .event_log import EventLogger
 from .htcondor_poll import query_queue, format_job_status
 
@@ -71,6 +73,9 @@ def _make_header(
         host = remote_info.get("host", "")
         if host:
             title.append(f" {host}", style="bold blue")
+    else:
+        title.append("  ")
+        title.append(" LIVE ", style="bold white on green")
 
     right_col = Text(no_wrap=True)
     if replay_info is not None or remote_info is not None:
@@ -109,6 +114,7 @@ def _make_status_bar(snap: WorkflowSnapshot) -> Panel:
     pct = snap.progress_pct()
     elapsed = fmt_duration(snap.elapsed)
     failed = snap.failed_count()
+    held = snap.held_count()
     running = snap.running_count()
     queued = snap.queued_count()
     unsubmitted = sum(
@@ -146,6 +152,8 @@ def _make_status_bar(snap: WorkflowSnapshot) -> Panel:
     counts.append(f"Queued:{queued} ", style="yellow")
     if unsubmitted:
         counts.append(f"Wait:{unsubmitted} ", style="dim")
+    if held:
+        counts.append(f"Held:{held} ", style="bold magenta")
     if failed:
         counts.append(f"Fail:{failed}", style="bold red")
 
@@ -198,9 +206,10 @@ def _make_job_table(
     for job in jobs_to_show:
         state_style = STATE_STYLE.get(job.disp_state, "")
         state_cell = Text(job.disp_state, style=state_style)
+        ec = real_exitcode(job.exitcode)
         exit_cell = (
-            Text(str(job.exitcode), style="green" if job.exitcode == 0 else "red")
-            if job.exitcode is not None
+            Text(str(ec), style="green" if ec == 0 else "red")
+            if ec is not None
             else Text("-", style="dim")
         )
         dur_cell = Text(fmt_duration(job.duration), style="dim")
@@ -288,6 +297,89 @@ def _make_infra_summary(snap: WorkflowSnapshot) -> Panel:
     return Panel(table, title="[bold]Auxiliary Jobs[/bold]", padding=(0, 0))
 
 
+# ─── Diagnostics panel ────────────────────────────────────────────────────
+
+def _make_diagnostics_panel(
+    snap: WorkflowSnapshot,
+    condor_jobs: Optional[List] = None,
+    submit_dir: Optional[Path] = None,
+) -> Panel:
+    held = snap.held_jobs()
+    failed = snap.failed_jobs()
+    diags = collect_diagnostics(held, failed, condor_jobs, submit_dir=submit_dir)
+
+    grid = Table.grid(expand=True, padding=(0, 1))
+    grid.add_column(ratio=1)
+
+    for diag in diags:
+        severity_style = "bold magenta" if diag.severity == "held" else "bold red"
+        icon = "⊘" if diag.severity == "held" else "✖"
+
+        header = Text()
+        header.append(f" {icon} ", style=severity_style)
+        header.append(diag.job_name, style="bold white")
+        header.append(f"  {diag.summary}", style=severity_style)
+        grid.add_row(header)
+
+        if diag.reason and diag.reason != f"Exit code: {None}":
+            # When suggestions already carry structured findings (e.g. "Missing: ..."
+            # from stderr analysis), skip the raw stderr dump to avoid noise.
+            has_structured = any(
+                s.startswith("Missing:") or s.startswith("Permission denied:")
+                for s in diag.suggestions
+            )
+            reason_parts = diag.reason.split(" | ")
+            for part in reason_parts:
+                # Skip the huge raw stderr when structured findings cover it
+                if has_structured and part.startswith("stderr:"):
+                    continue
+                reason_text = Text()
+                reason_text.append("   ", style="dim")
+                if part.startswith("stdout:"):
+                    reason_text.append("stdout: ", style="dim")
+                    msg = part[len("stdout:"):].strip()
+                    if len(msg) > 120:
+                        msg = msg[:117] + "..."
+                    reason_text.append(msg, style="bold white")
+                elif part.startswith("stderr:"):
+                    reason_text.append("stderr: ", style="dim")
+                    msg = part[len("stderr:"):].strip()
+                    if len(msg) > 120:
+                        msg = msg[:117] + "..."
+                    reason_text.append(msg, style="bold yellow")
+                elif part.startswith("executable:"):
+                    reason_text.append("exec:   ", style="dim")
+                    reason_text.append(part[len("executable:"):].strip(), style="dim white")
+                else:
+                    reason_text.append(part, style="dim white")
+                grid.add_row(reason_text)
+
+        for suggestion in diag.suggestions[:5]:
+            sug_text = Text()
+            if suggestion.startswith("Missing:"):
+                sug_text.append("   ✗ ", style="bold red")
+                sug_text.append(suggestion[len("Missing:"):].strip(), style="bold red")
+            elif suggestion.startswith("Permission denied:"):
+                sug_text.append("   ✗ ", style="bold red")
+                sug_text.append(suggestion, style="bold red")
+            else:
+                sug_text.append("   → ", style="yellow")
+                sug_text.append(suggestion, style="yellow")
+            grid.add_row(sug_text)
+
+        grid.add_row(Text(""))  # spacer between diagnostics
+
+    if not diags:
+        grid.add_row(Text("  No issues detected", style="dim green"))
+
+    return Panel(
+        grid,
+        title="[bold yellow]Diagnostics[/bold yellow]",
+        border_style="yellow",
+        padding=(0, 0),
+    )
+
+
 # ─── Full layout assembly ─────────────────────────────────────────────────────
 
 def build_layout(
@@ -299,14 +391,28 @@ def build_layout(
     refresh_ts: float,
     replay_info: Optional[dict] = None,
     remote_info: Optional[dict] = None,
+    submit_dir: Optional[Path] = None,
 ) -> Layout:
+    has_issues = snap.held_count() > 0 or snap.failed_count() > 0
+
+    # Calculate diagnostics panel height based on number of issues
+    diag_height = 0
+    if has_issues:
+        n_issues = snap.held_count() + snap.failed_count()
+        # ~7 lines per issue (header + exitcode + stdout + stderr + exec + suggestions + spacer)
+        diag_height = min(3 + n_issues * 7, 25)
+
     layout = Layout()
-    layout.split_column(
+    parts = [
         Layout(name="header", size=4),
         Layout(name="status", size=5),
-        Layout(name="main"),
-        Layout(name="events", size=events_n + 3),
-    )
+    ]
+    if has_issues:
+        parts.append(Layout(name="diagnostics", size=diag_height))
+    parts.append(Layout(name="main"))
+    parts.append(Layout(name="events", size=events_n + 3))
+    layout.split_column(*parts)
+
     layout["main"].split_row(
         Layout(name="jobs", ratio=3),
         Layout(name="infra", ratio=1),
@@ -314,6 +420,8 @@ def build_layout(
 
     layout["header"].update(_make_header(info, snap, refresh_ts, replay_info=replay_info, remote_info=remote_info))
     layout["status"].update(_make_status_bar(snap))
+    if has_issues:
+        layout["diagnostics"].update(_make_diagnostics_panel(snap, condor_jobs=condor_jobs, submit_dir=submit_dir))
     layout["jobs"].update(_make_job_table(snap, show_all=show_all, condor_jobs=condor_jobs))
     layout["infra"].update(_make_infra_summary(snap))
     layout["events"].update(_make_events_panel(snap, n=events_n))
@@ -378,11 +486,13 @@ def run_monitor(
         snap, condor_jobs, ts = _refresh()
         console.print(_make_header(info, snap, ts))
         console.print(_make_status_bar(snap))
+        if snap.held_count() > 0 or snap.failed_count() > 0:
+            console.print(_make_diagnostics_panel(snap, condor_jobs=condor_jobs, submit_dir=info.submit_dir))
         console.print(_make_job_table(snap, show_all=show_all, condor_jobs=condor_jobs))
         if snap.infra_jobs():
             console.print(_make_infra_summary(snap))
         console.print(_make_events_panel(snap, n=events_n))
-        _print_final_summary(console, snap)
+        _print_final_summary(console, snap, condor_jobs=condor_jobs, submit_dir=info.submit_dir)
         if logger is not None:
             logger.close(snap)
         return
@@ -397,7 +507,8 @@ def run_monitor(
             while True:
                 snap, condor_jobs, ts = _refresh()
                 layout = build_layout(
-                    info, snap, show_all, condor_jobs, events_n, ts
+                    info, snap, show_all, condor_jobs, events_n, ts,
+                    submit_dir=info.submit_dir,
                 )
                 live.update(layout)
 
@@ -406,7 +517,8 @@ def run_monitor(
                     time.sleep(poll_interval)
                     snap, condor_jobs, ts = _refresh()
                     live.update(
-                        build_layout(info, snap, show_all, condor_jobs, events_n, ts)
+                        build_layout(info, snap, show_all, condor_jobs, events_n, ts,
+                                     submit_dir=info.submit_dir)
                     )
                     break
 
@@ -416,12 +528,17 @@ def run_monitor(
             pass
 
     # After live session ends, print a brief final summary
-    _print_final_summary(console, snap)
+    _print_final_summary(console, snap, condor_jobs=condor_jobs, submit_dir=info.submit_dir)
     if logger is not None:
         logger.close(snap)
 
 
-def _print_final_summary(console: Console, snap: WorkflowSnapshot) -> None:
+def _print_final_summary(
+    console: Console,
+    snap: WorkflowSnapshot,
+    condor_jobs: Optional[List] = None,
+    submit_dir: Optional[Path] = None,
+) -> None:
     console.print()
     if snap.succeeded:
         console.print(
@@ -432,11 +549,55 @@ def _print_final_summary(console: Console, snap: WorkflowSnapshot) -> None:
         console.print(
             f"[bold red]✖ Workflow FAILED[/bold red]  "
             f"(elapsed: {fmt_duration(snap.elapsed)}, "
-            f"failed jobs: {snap.failed_count()})"
+            f"failed jobs: {snap.failed_count()}"
+            f"{f', held jobs: {snap.held_count()}' if snap.held_count() else ''})"
         )
+        # Print diagnostics summary
+        held = snap.held_jobs()
+        failed = snap.failed_jobs()
+        if held or failed:
+            diags = collect_diagnostics(held, failed, condor_jobs, submit_dir=submit_dir)
+            for diag in diags:
+                icon = "⊘" if diag.severity == "held" else "✖"
+                style = "magenta" if diag.severity == "held" else "red"
+                console.print(f"  [{style}]{icon} {diag.job_name}[/{style}]: {diag.summary}")
+                has_structured = any(
+                    s.startswith("Missing:") or s.startswith("Permission denied:")
+                    for s in diag.suggestions
+                )
+                if diag.reason:
+                    for part in diag.reason.split(" | "):
+                        if has_structured and part.startswith("stderr:"):
+                            continue
+                        if part.startswith("stdout:"):
+                            console.print(f"    [white]stdout: {part[7:].strip()}[/white]")
+                        elif part.startswith("stderr:"):
+                            msg = part[7:].strip()
+                            if len(msg) > 200:
+                                msg = msg[:197] + "..."
+                            console.print(f"    [yellow]stderr: {msg}[/yellow]")
+                        elif part.startswith("executable:"):
+                            console.print(f"    [dim]exec: {part[11:].strip()}[/dim]")
+                        else:
+                            console.print(f"    [dim]{part}[/dim]")
+                for sug in diag.suggestions[:4]:
+                    if sug.startswith("Missing:"):
+                        console.print(f"    [bold red]✗ {sug[8:].strip()}[/bold red]")
+                    elif sug.startswith("Permission denied:"):
+                        console.print(f"    [bold red]✗ {sug}[/bold red]")
+                    else:
+                        console.print(f"    [yellow]→ {sug}[/yellow]")
     else:
-        console.print(
-            f"[yellow]◌ Monitoring stopped[/yellow]  "
-            f"(state: {snap.wf_state})"
-        )
+        held = snap.held_count()
+        msg = f"[yellow]◌ Monitoring stopped[/yellow]  (state: {snap.wf_state}"
+        if held:
+            msg += f", held: {held}"
+        msg += ")"
+        console.print(msg)
+        if held:
+            diags = collect_diagnostics(snap.held_jobs(), [], condor_jobs, submit_dir=submit_dir)
+            for diag in diags:
+                console.print(f"  [magenta]⊘ {diag.job_name}[/magenta]: {diag.summary}")
+                for sug in diag.suggestions[:2]:
+                    console.print(f"    [yellow]→ {sug}[/yellow]")
     console.print()

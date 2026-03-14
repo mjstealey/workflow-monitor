@@ -15,7 +15,9 @@ _STATE_MAP: Dict[str, str] = {
     "POST_SCRIPT_SUCCESS": "SUCCESS",
     "JOB_SUCCESS": "SUCCESS",
     "POST_SCRIPT_FAILURE": "FAILED",
+    "POST_SCRIPT_FAILED": "FAILED",
     "JOB_FAILURE": "FAILED",
+    "JOB_FAILED": "FAILED",
     "EXECUTE": "RUNNING",
     "SUBMIT": "QUEUED",
     "PRE_SCRIPT_STARTED": "PRE",
@@ -24,6 +26,7 @@ _STATE_MAP: Dict[str, str] = {
     "POST_SCRIPT_TERMINATED": "POST",
     "JOB_TERMINATED": "DONE",
     "JOB_HELD": "HELD",
+    "JOB_EVICTED": "HELD",
 }
 
 # Rich color per display state
@@ -74,6 +77,15 @@ def fmt_timestamp(ts: Optional[float]) -> str:
     if ts is None:
         return "-"
     return datetime.fromtimestamp(ts).strftime("%H:%M:%S")
+
+
+def real_exitcode(raw: Optional[int]) -> Optional[int]:
+    """Convert raw wait status to real exit code."""
+    if raw is None:
+        return None
+    if raw > 128:
+        return raw >> 8
+    return raw
 
 
 # ─── Data classes ─────────────────────────────────────────────────────────────
@@ -170,6 +182,15 @@ class WorkflowSnapshot:
 
     def failed_count(self) -> int:
         return sum(1 for j in self.jobs if j.disp_state == "FAILED")
+
+    def held_count(self) -> int:
+        return sum(1 for j in self.jobs if j.disp_state == "HELD")
+
+    def held_jobs(self) -> List[JobRecord]:
+        return [j for j in self.jobs if j.disp_state == "HELD"]
+
+    def failed_jobs(self) -> List[JobRecord]:
+        return [j for j in self.jobs if j.disp_state == "FAILED"]
 
     def running_count(self) -> int:
         return sum(1 for j in self.jobs if j.disp_state == "RUNNING")
@@ -330,7 +351,8 @@ class StampedeDB:
                 j.type_desc,
                 js.state,
                 js.timestamp,
-                j.job_id
+                j.job_id,
+                ji.exitcode
             FROM job j
             JOIN job_instance ji ON j.job_id = ji.job_id
             JOIN jobstate js ON ji.job_instance_id = js.job_instance_id

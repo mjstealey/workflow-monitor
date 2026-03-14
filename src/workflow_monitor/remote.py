@@ -184,6 +184,8 @@ class RemoteEngine:
         self._prescan_jobs: Dict[int, Dict[str, str]] = {}
         self._processed_lines: int = 0
         self._workflow_complete: bool = False
+        self._condor_jobs: Optional[List[Dict]] = None
+        self._pending_workflow_end: Optional[Dict[str, Any]] = None
 
     def _do_sync(self) -> tuple[bool, str]:
         """Fetch the remote file via SSH (incremental after first sync)."""
@@ -251,9 +253,11 @@ class RemoteEngine:
             self._wf_state = ev.get("state", self._wf_state)
             self._wf_status = ev.get("status")
             if self._wf_state == "WORKFLOW_STARTED" and self._wf_start is None:
-                self._wf_start = ev.get("timestamp")
+                # Prefer actual DB start time over logger wall clock
+                self._wf_start = ev.get("wf_start") or ev.get("timestamp")
             elif self._wf_state == "WORKFLOW_TERMINATED":
-                self._wf_end = ev.get("timestamp")
+                # Prefer actual DB end time over logger wall clock
+                self._wf_end = ev.get("wf_end") or ev.get("timestamp")
 
         elif etype == "jobs_init":
             for j in ev.get("jobs", []):
@@ -288,6 +292,9 @@ class RemoteEngine:
                 state = ev.get("state")
                 js["raw_state"] = state
                 ts = ev.get("timestamp")
+                if ev.get("exitcode") is not None:
+                    from .db import real_exitcode
+                    js["exitcode"] = real_exitcode(ev["exitcode"])
 
                 if state == "SUBMIT" and js["submit_time"] is None:
                     js["submit_time"] = ts
@@ -303,13 +310,22 @@ class RemoteEngine:
                     "timestamp": ts,
                 })
 
+        elif etype == "htcondor_poll":
+            self._condor_jobs = ev.get("jobs")
+
         elif etype == "workflow_end":
-            self._wf_state = ev.get("wf_state", self._wf_state)
-            self._wf_status = ev.get("wf_status", self._wf_status)
-            if ev.get("wf_state") == "WORKFLOW_TERMINATED":
-                if self._wf_end is None:
-                    self._wf_end = ev.get("timestamp")
-                self._workflow_complete = True
+            # Defer marking complete — a resumed server may append events
+            # after a prior workflow_end.  We mark complete only in
+            # _finalize_batch() after all current events are processed.
+            self._pending_workflow_end = ev
+            return  # skip the clearing logic below
+
+        # Any non-end event after a workflow_end means the server resumed
+        if self._pending_workflow_end is not None and etype in (
+            "job_state", "workflow_state", "htcondor_poll",
+        ):
+            self._pending_workflow_end = None
+            self._workflow_complete = False
 
         # Use header wf_start if not yet set from events
         if self._wf_start is None and self._header_wf_start is not None:
@@ -317,6 +333,23 @@ class RemoteEngine:
 
         # Trim recent events
         self._recent_events = self._recent_events[-self._events_n:]
+
+    def _finalize_batch(self) -> None:
+        """After processing all events from a sync, resolve any pending
+        workflow_end.  If a workflow_end was followed by newer events
+        (server resume), it was already cleared by those events."""
+        ev = self._pending_workflow_end
+        if ev is None:
+            return
+        self._wf_state = ev.get("wf_state", self._wf_state)
+        self._wf_status = ev.get("wf_status", self._wf_status)
+        if ev.get("wf_state") == "WORKFLOW_TERMINATED":
+            # Prefer the actual DB end time over the logger's wall clock
+            wf_end = ev.get("wf_end") or ev.get("timestamp")
+            if self._wf_end is None:
+                self._wf_end = wf_end
+            self._workflow_complete = True
+        self._pending_workflow_end = None
 
     def _build_snapshot(self) -> WorkflowSnapshot:
         """Build a WorkflowSnapshot from the current accumulated state."""
@@ -347,7 +380,7 @@ class RemoteEngine:
             poll_time=now,
         )
 
-    def run(self, show_all: bool = False) -> None:
+    def run(self, show_all: bool = False, once: bool = False) -> None:
         """Run the remote monitoring TUI."""
         console = Console()
 
@@ -374,6 +407,7 @@ class RemoteEngine:
 
         for ev in events:
             self._apply_event(ev)
+        self._finalize_batch()
 
         if self._info is None:
             console.print(
@@ -384,12 +418,35 @@ class RemoteEngine:
         info = self._info
         remote_info = {"host": self._host}
 
+        snap = self._build_snapshot()
+
+        if once:
+            from .display import (
+                _make_header,
+                _make_status_bar,
+                _make_diagnostics_panel,
+                _make_job_table,
+                _make_infra_summary,
+                _make_events_panel,
+                _print_final_summary,
+            )
+
+            console.print(_make_header(info, snap, snap.poll_time, remote_info=remote_info))
+            console.print(_make_status_bar(snap))
+            if snap.held_count() > 0 or snap.failed_count() > 0:
+                console.print(_make_diagnostics_panel(snap, condor_jobs=self._condor_jobs))
+            console.print(_make_job_table(snap, show_all=show_all, condor_jobs=self._condor_jobs))
+            if snap.infra_jobs():
+                console.print(_make_infra_summary(snap))
+            console.print(_make_events_panel(snap, n=self._events_n))
+            _print_final_summary(console, snap, condor_jobs=self._condor_jobs)
+            self._cleanup()
+            return
+
         console.print(
             f"[dim]Monitoring {info.dax_label} via SSH "
             f"(sync every {self._sync_interval:.0f}s)[/dim]"
         )
-
-        snap = self._build_snapshot()
 
         with Live(
             console=console,
@@ -404,7 +461,7 @@ class RemoteEngine:
                     # Update display with current state
                     snap = self._build_snapshot()
                     layout = build_layout(
-                        info, snap, show_all, None,
+                        info, snap, show_all, self._condor_jobs,
                         self._events_n, snap.poll_time,
                         remote_info=remote_info,
                     )
@@ -423,6 +480,7 @@ class RemoteEngine:
                         new_events = self._load_new_events()
                         for ev in new_events:
                             self._apply_event(ev)
+                        self._finalize_batch()
                         last_sync = time.time()
 
             except KeyboardInterrupt:
@@ -445,7 +503,10 @@ class RemoteEngine:
             )
         console.print()
 
-        # Clean up temp file
+        self._cleanup()
+
+    def _cleanup(self) -> None:
+        """Remove temporary files."""
         try:
             self._local_path.unlink(missing_ok=True)
             Path(self._tmpdir).rmdir()
