@@ -38,7 +38,7 @@ class EventLogger:
 
         self._high_water_ts: float = 0.0
         self._last_wf_state: Optional[str] = None
-        self._last_condor_ids: set[str] = set()
+        self._last_condor_fingerprint: frozenset[tuple] = frozenset()
         self._jobs_init_emitted: bool = False
         self._resumed: bool = False
 
@@ -92,10 +92,7 @@ class EventLogger:
 
                     elif etype == "htcondor_poll":
                         jobs = ev.get("jobs", [])
-                        self._last_condor_ids = {
-                            cj.get("ClusterId", cj.get("DAGNodeName", ""))
-                            for cj in jobs
-                        }
+                        self._last_condor_fingerprint = self._condor_fingerprint(jobs)
 
                     elif etype == "workflow_end":
                         last_end_offset = offset
@@ -233,17 +230,29 @@ class EventLogger:
             if ev["timestamp"] > self._high_water_ts:
                 self._high_water_ts = ev["timestamp"]
 
+    @staticmethod
+    def _condor_fingerprint(jobs: List[Dict]) -> frozenset:
+        """Build a fingerprint that captures job identity AND key attributes.
+
+        This ensures an htcondor_poll event is emitted when a job's status
+        or hold reason changes, not just when the set of job IDs changes.
+        """
+        parts = []
+        for cj in jobs:
+            key = cj.get("ClusterId", cj.get("DAGNodeName", ""))
+            status = cj.get("JobStatus", "")
+            hold = cj.get("HoldReason", "")
+            parts.append((str(key), str(status), hold))
+        return frozenset(parts)
+
     def _record_condor_poll(self, condor_jobs: Optional[List[Dict]]) -> None:
         if condor_jobs is None:
             return
-        current_ids = {
-            cj.get("ClusterId", cj.get("DAGNodeName", ""))
-            for cj in condor_jobs
-        }
-        if current_ids != self._last_condor_ids:
+        fp = self._condor_fingerprint(condor_jobs)
+        if fp != self._last_condor_fingerprint:
             self._emit({
                 "event_type": "htcondor_poll",
                 "timestamp": time.time(),
                 "jobs": condor_jobs,
             })
-            self._last_condor_ids = current_ids
+            self._last_condor_fingerprint = fp
