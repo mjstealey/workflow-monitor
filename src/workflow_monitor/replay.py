@@ -127,10 +127,15 @@ class ReplayEngine:
                 for j in ev.get("jobs", []):
                     jid = j.get("job_id")
                     if jid is not None:
-                        jobs[jid] = {
+                        entry: dict = {
                             "exec_job_id": j.get("exec_job_id", ""),
                             "type_desc": j.get("type_desc", "compute"),
                         }
+                        if j.get("transformation"):
+                            entry["transformation"] = j["transformation"]
+                        if j.get("task_argv"):
+                            entry["task_argv"] = j["task_argv"]
+                        jobs[jid] = entry
                 return jobs
             if ev.get("event_type") == "job_state":
                 jid = ev.get("job_id")
@@ -212,6 +217,11 @@ class ReplayEngine:
                             "submit_time": None,
                             "start_time": None,
                             "end_time": None,
+                            "transformation": j.get("transformation"),
+                            "task_argv": j.get("task_argv"),
+                            "stdout_file": None,
+                            "stderr_file": None,
+                            "maxrss": None,
                         }
 
             elif etype == "job_state":
@@ -227,11 +237,23 @@ class ReplayEngine:
                             "submit_time": None,
                             "start_time": None,
                             "end_time": None,
+                            "transformation": None,
+                            "task_argv": None,
+                            "stdout_file": None,
+                            "stderr_file": None,
+                            "maxrss": None,
                         }
                     js = job_state[jid]
                     state = ev.get("state")
                     js["raw_state"] = state
                     ts = ev.get("timestamp")
+                    # Capture runtime metadata when present
+                    if ev.get("stdout_file"):
+                        js["stdout_file"] = ev["stdout_file"]
+                    if ev.get("stderr_file"):
+                        js["stderr_file"] = ev["stderr_file"]
+                    if ev.get("maxrss") is not None:
+                        js["maxrss"] = ev["maxrss"]
 
                     if state == "SUBMIT" and js["submit_time"] is None:
                         js["submit_time"] = ts
@@ -276,6 +298,11 @@ class ReplayEngine:
                 start_time=js["start_time"],
                 end_time=js["end_time"],
                 _now=frame_ts,
+                transformation=js.get("transformation"),
+                task_argv=js.get("task_argv"),
+                stdout_file=js.get("stdout_file"),
+                stderr_file=js.get("stderr_file"),
+                maxrss=js.get("maxrss"),
             )
             for jid, js in sorted(job_state.items())
         ]
@@ -319,6 +346,11 @@ class ReplayEngine:
                 "submit_time": None,
                 "start_time": None,
                 "end_time": None,
+                "transformation": jmeta.get("transformation"),
+                "task_argv": jmeta.get("task_argv"),
+                "stdout_file": None,
+                "stderr_file": None,
+                "maxrss": None,
             }
         wf_state = "UNKNOWN"
         wf_status: Optional[int] = None

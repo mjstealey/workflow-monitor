@@ -25,6 +25,7 @@ from .db import (
     StampedeDB,
     WorkflowSnapshot,
     fmt_duration,
+    fmt_memory,
     fmt_timestamp,
     real_exitcode,
 )
@@ -196,12 +197,14 @@ def _make_job_table(
         expand=True,
         padding=(0, 1),
     )
-    table.add_column("Job Name", style="white", ratio=3, no_wrap=True)
+    table.add_column("Job", style="white", ratio=3, no_wrap=True)
     table.add_column("Type", style="dim", ratio=1, no_wrap=True)
     table.add_column("State", ratio=1, no_wrap=True)
     table.add_column("Exit", justify="right", no_wrap=True, ratio=0)
     table.add_column("Duration", justify="right", no_wrap=True, ratio=1)
-    table.add_column("Live (Condor)", style="dim", ratio=1, no_wrap=True)
+    table.add_column("Args", style="dim", ratio=2, no_wrap=True, max_width=40)
+    table.add_column("Mem", justify="right", style="dim", no_wrap=True, width=7)
+    table.add_column("Live", style="dim", ratio=1, no_wrap=True)
 
     for job in jobs_to_show:
         state_style = STATE_STYLE.get(job.disp_state, "")
@@ -214,6 +217,14 @@ def _make_job_table(
         )
         dur_cell = Text(fmt_duration(job.duration), style="dim")
 
+        # Task arguments (truncated)
+        argv = job.task_argv or ""
+        if len(argv) > 37:
+            argv = argv[:37] + "..."
+        argv_cell = Text(argv, style="dim")
+
+        mem_cell = Text(fmt_memory(job.maxrss), style="dim")
+
         # Condor live info
         condor_info = condor_map.get(job.exec_job_id, {})
         if condor_info:
@@ -225,18 +236,20 @@ def _make_job_table(
         type_label = JOB_TYPE_LABEL.get(job.type_desc, job.type_desc)
 
         table.add_row(
-            job.short_name,
+            job.display_name,
             type_label,
             state_cell,
             exit_cell,
             dur_cell,
+            argv_cell,
+            mem_cell,
             live_cell,
         )
 
     if not jobs_to_show:
         table.add_row(
             Text("(no jobs yet)", style="dim italic"),
-            "", "", "", "", "",
+            "", "", "", "", "", "", "",
         )
 
     title = "[bold]Compute Jobs[/bold]" if not show_all else "[bold]All Jobs[/bold]"
@@ -247,25 +260,54 @@ def _make_job_table(
 
 def _make_events_panel(snap: WorkflowSnapshot, n: int = 15) -> Panel:
     table = Table(
-        box=None,
-        show_header=False,
+        box=box.SIMPLE,
+        show_header=True,
+        header_style="bold dim",
         expand=True,
         padding=(0, 1),
     )
-    table.add_column("Time", style="dim", no_wrap=True, width=10)
-    table.add_column("Job", no_wrap=True, ratio=3)
-    table.add_column("State", no_wrap=True, ratio=2)
+    table.add_column("Job", style="white", no_wrap=True, ratio=3)
+    table.add_column("State", no_wrap=True, ratio=1)
+    table.add_column("Start", style="dim", no_wrap=True, width=10)
+    table.add_column("End", style="dim", no_wrap=True, width=10)
+    table.add_column("Duration", justify="right", style="dim", no_wrap=True, width=9)
+    table.add_column("Mem", justify="right", style="dim", no_wrap=True, width=7)
 
-    events = snap.recent_events[:n]
-    for ev in events:
-        ts = fmt_timestamp(ev.get("timestamp"))
-        raw = ev.get("state", "")
-        style = STATE_STYLE.get(raw, "dim")
-        job_name = ev.get("exec_job_id", "")
+    # Show jobs sorted by most recent activity (end_time or start_time)
+    active_jobs = [
+        j for j in snap.jobs
+        if j.raw_state is not None  # only jobs that have been submitted
+    ]
+    active_jobs.sort(
+        key=lambda j: j.end_time or j.start_time or j.submit_time or 0,
+        reverse=True,
+    )
+
+    for job in active_jobs[:n]:
+        state_style = STATE_STYLE.get(job.disp_state, "dim")
+        state_cell = Text(job.disp_state, style=state_style)
+        start_cell = Text(
+            fmt_timestamp(job.start_time or job.submit_time), style="dim"
+        )
+        end_cell = Text(
+            fmt_timestamp(job.end_time) if job.end_time else "-", style="dim"
+        )
+        dur_cell = Text(fmt_duration(job.duration), style="dim")
+        mem_cell = Text(fmt_memory(job.maxrss), style="dim")
+
         table.add_row(
-            ts,
-            Text(job_name, style="dim white", no_wrap=True),
-            Text(raw, style=style),
+            job.display_name,
+            state_cell,
+            start_cell,
+            end_cell,
+            dur_cell,
+            mem_cell,
+        )
+
+    if not active_jobs:
+        table.add_row(
+            Text("(no activity yet)", style="dim italic"),
+            "", "", "", "", "",
         )
 
     return Panel(table, title="[bold]Recent Events[/bold]", padding=(0, 0))

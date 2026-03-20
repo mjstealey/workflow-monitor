@@ -88,6 +88,16 @@ def real_exitcode(raw: Optional[int]) -> Optional[int]:
     return raw
 
 
+def fmt_memory(maxrss_kb: Optional[int]) -> str:
+    """Format maxrss (KB) as human-readable."""
+    if maxrss_kb is None:
+        return "-"
+    mb = maxrss_kb / 1024.0
+    if mb < 1024:
+        return f"{mb:.1f}M"
+    return f"{mb / 1024:.2f}G"
+
+
 # ─── Data classes ─────────────────────────────────────────────────────────────
 
 @dataclass
@@ -102,6 +112,12 @@ class JobRecord:
     start_time: Optional[float]
     end_time: Optional[float]
     _now: Optional[float] = field(default=None, repr=False)
+    # Enriched metadata
+    transformation: Optional[str] = None
+    task_argv: Optional[str] = None
+    stdout_file: Optional[str] = None
+    stderr_file: Optional[str] = None
+    maxrss: Optional[int] = None  # peak RSS in KB
 
     @property
     def disp_state(self) -> str:
@@ -126,6 +142,13 @@ class JobRecord:
         name = self.exec_job_id
         # e.g. preprocess_ID0000001 -> preprocess_ID0000001 (keep as-is)
         return name
+
+    @property
+    def display_name(self) -> str:
+        """Prefer transformation name for compute jobs, else exec_job_id."""
+        if self.transformation and self.is_compute:
+            return self.transformation
+        return self.exec_job_id
 
 
 @dataclass
@@ -271,10 +294,20 @@ class StampedeDB:
         return {"start": start, "end": end}
 
     def get_jobs(self) -> List[JobRecord]:
-        """Return all jobs with their latest observed state."""
+        """Return all jobs with their latest observed state and metadata."""
         cur = self._conn_or_raise().cursor()
         cur.execute(
             """
+            WITH latest_ji AS (
+                SELECT job_id, job_instance_id, exitcode, site,
+                       stdout_file, stderr_file
+                FROM job_instance
+                WHERE (job_id, job_submit_seq) IN (
+                    SELECT job_id, MAX(job_submit_seq)
+                    FROM job_instance
+                    GROUP BY job_id
+                )
+            )
             SELECT
                 j.job_id,
                 j.exec_job_id,
@@ -282,25 +315,12 @@ class StampedeDB:
                 (
                     SELECT js.state
                     FROM jobstate js
-                    JOIN job_instance ji2 ON js.job_instance_id = ji2.job_instance_id
-                    WHERE ji2.job_id = j.job_id
+                    WHERE js.job_instance_id = lji.job_instance_id
                     ORDER BY js.timestamp DESC, js.jobstate_submit_seq DESC
                     LIMIT 1
                 ) AS current_state,
-                (
-                    SELECT ji2.exitcode
-                    FROM job_instance ji2
-                    WHERE ji2.job_id = j.job_id
-                    ORDER BY ji2.job_submit_seq DESC
-                    LIMIT 1
-                ) AS exitcode,
-                (
-                    SELECT ji2.site
-                    FROM job_instance ji2
-                    WHERE ji2.job_id = j.job_id
-                    ORDER BY ji2.job_submit_seq DESC
-                    LIMIT 1
-                ) AS site,
+                lji.exitcode,
+                lji.site,
                 (
                     SELECT MIN(js.timestamp)
                     FROM jobstate js
@@ -319,8 +339,17 @@ class StampedeDB:
                     JOIN job_instance ji2 ON js.job_instance_id = ji2.job_instance_id
                     WHERE ji2.job_id = j.job_id
                       AND js.state IN ('JOB_TERMINATED', 'JOB_SUCCESS', 'JOB_FAILURE')
-                ) AS end_time
+                ) AS end_time,
+                t.transformation,
+                t.argv AS task_argv,
+                lji.stdout_file,
+                lji.stderr_file,
+                (SELECT MAX(inv.maxrss) FROM invocation inv
+                 WHERE inv.job_instance_id = lji.job_instance_id
+                   AND inv.task_submit_seq >= 0) AS maxrss
             FROM job j
+            LEFT JOIN latest_ji lji ON j.job_id = lji.job_id
+            LEFT JOIN task t ON t.job_id = j.job_id
             ORDER BY j.job_id
             """
         )
@@ -337,6 +366,11 @@ class StampedeDB:
                     submit_time=row["submit_time"],
                     start_time=row["start_time"],
                     end_time=row["end_time"],
+                    transformation=row["transformation"],
+                    task_argv=row["task_argv"],
+                    stdout_file=row["stdout_file"],
+                    stderr_file=row["stderr_file"],
+                    maxrss=row["maxrss"],
                 )
             )
         return jobs
@@ -352,7 +386,12 @@ class StampedeDB:
                 js.state,
                 js.timestamp,
                 j.job_id,
-                ji.exitcode
+                ji.exitcode,
+                ji.stdout_file,
+                ji.stderr_file,
+                (SELECT MAX(inv.maxrss) FROM invocation inv
+                 WHERE inv.job_instance_id = ji.job_instance_id
+                   AND inv.task_submit_seq >= 0) AS maxrss
             FROM job j
             JOIN job_instance ji ON j.job_id = ji.job_id
             JOIN jobstate js ON ji.job_instance_id = js.job_instance_id

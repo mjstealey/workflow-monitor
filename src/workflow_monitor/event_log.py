@@ -184,11 +184,16 @@ class EventLogger:
         """Emit a jobs_init event listing the full job roster from the first snapshot."""
         jobs = []
         for j in snapshot.jobs:
-            jobs.append({
+            entry: dict = {
                 "job_id": j.job_id,
                 "exec_job_id": j.exec_job_id,
                 "type_desc": j.type_desc,
-            })
+            }
+            if j.transformation:
+                entry["transformation"] = j.transformation
+            if j.task_argv:
+                entry["task_argv"] = j.task_argv
+            jobs.append(entry)
         self._emit({
             "event_type": "jobs_init",
             "timestamp": time.time(),
@@ -226,6 +231,12 @@ class EventLogger:
             }
             if ev.get("exitcode") is not None:
                 record["exitcode"] = ev["exitcode"]
+            if ev.get("stdout_file"):
+                record["stdout_file"] = ev["stdout_file"]
+            if ev.get("stderr_file"):
+                record["stderr_file"] = ev["stderr_file"]
+            if ev.get("maxrss") is not None:
+                record["maxrss"] = ev["maxrss"]
             self._emit(record)
             if ev["timestamp"] > self._high_water_ts:
                 self._high_water_ts = ev["timestamp"]

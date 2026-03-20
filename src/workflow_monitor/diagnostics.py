@@ -265,10 +265,16 @@ class KickstartInfo:
             self.argv = []
 
 
-def parse_kickstart_output(submit_dir: Path, exec_job_id: str) -> Optional[KickstartInfo]:
+def parse_kickstart_output(
+    submit_dir: Path,
+    exec_job_id: str,
+    stdout_file: Optional[str] = None,
+) -> Optional[KickstartInfo]:
     """Parse the kickstart .out.000 file for a job, extracting stdout/stderr."""
-    # Kickstart outputs live under 00/00/ in the submit dir
-    out_file = submit_dir / "00" / "00" / f"{exec_job_id}.out.000"
+    if stdout_file:
+        out_file = submit_dir / stdout_file
+    else:
+        out_file = submit_dir / "00" / "00" / f"{exec_job_id}.out.000"
     if not out_file.exists():
         return None
 
@@ -500,7 +506,9 @@ def collect_diagnostics(
     for job in failed_jobs:
         kickstart = None
         if submit_dir:
-            kickstart = parse_kickstart_output(submit_dir, job.exec_job_id)
+            kickstart = parse_kickstart_output(
+                submit_dir, job.exec_job_id, stdout_file=job.stdout_file,
+            )
         diagnostics.append(diagnose_failed_job(job, kickstart=kickstart))
 
     return diagnostics

@@ -4,25 +4,28 @@ A real-time terminal dashboard for monitoring running [Pegasus WMS](https://pega
 
 ```
 ╭──────────────────────────────────────────────────────────────────────────────╮
-│ Pegasus Workflow Monitor                                  Refreshed 12:53:48 │
-│ workflow: diamond  uuid: bebbd357…  user: stealey  LIVE        pegasus 5.1.2 │
+│ Pegasus Workflow Monitor   LIVE                           Refreshed 12:42:07 │
+│ workflow: earthquake  uuid: 60843726…  user: stealey           pegasus 5.1.2 │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭────────────────────────────── Workflow Status ───────────────────────────────╮
-│ ● RUNNING  Elapsed: 1m08s  41.7%  5/12 done  Done:5 Run:1 Queued:0 Wait:6    │
-│ [████████████████░░░░░░░░░░░░░░░░░░░░░░░░]                                   │
+│ ● RUNNING  Elapsed: 1m42s  60.0%  21/35 done  Done:21 Run:3 Queued:0 Wait:11 │
+│ [████████████████████████░░░░░░░░░░░░░░░░]                                   │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭──────────────────────────────── Compute Jobs ────────────────────────────────╮
-│  Job Name                        Type       State      Exit  Duration        │
-│  preprocess_ID0000001            compute    SUCCESS    0       1m00s         │
-│  analyze_ID0000004               compute    RUNNING    -         22s         │
-│  findrange_ID0000003             compute    SUCCESS    0         45s         │
-│  findrange_ID0000002             compute    SUCCESS    0         41s         │
+│  Job                  Type    State   Exit  Duration  Args           Mem     │
+│  fetch_earthquake_…  compute  SUCCESS  0       12s  --region …    109.2M     │
+│  detect_seismic_an…  compute  SUCCESS  0       15s  --input c…    167.1M     │
+│  cluster_seismic_z…  compute  RUNNING  -       18s  --input c…         -     │
+│  assess_seismic_ha…  compute  RUNNING  -       12s  --input c…         -     │
+│  visualize_earthqu…  compute  SUCCESS  0       10s  --input c…    320.6M     │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭─────────────────────────────── Recent Events ────────────────────────────────╮
-│ 12:55:31    analyze_ID0000004                       EXECUTE                  │
-│ 12:55:31    analyze_ID0000004                       SUBMIT                   │
-│ 12:55:26    findrange_ID0000002                     POST_SCRIPT_SUCCESS      │
-│ ...                                                                          │
+│  Job                     State    Start       End        Duration       Mem  │
+│  cluster_seismic_zo…    RUNNING   12:42:07    -              18s          -  │
+│  assess_seismic_haz…    RUNNING   12:42:07    -              12s          -  │
+│  detect_seismic_ano…    SUCCESS   12:42:07    12:42:22       15s     167.1M  │
+│  analyze_seismic_ga…    SUCCESS   12:42:07    12:42:22       15s     167.2M  │
+│  ...                                                                        │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ```
 
@@ -336,18 +339,29 @@ A table of individual jobs with:
 
 | Column | Description |
 |--------|-------------|
-| **Job Name** | The DAG node name (e.g. `preprocess_ID0000001`) |
+| **Job** | Transformation name for compute jobs (e.g. `detect_seismic_anomalies`), DAG node name for infrastructure jobs |
 | **Type** | Job category: `compute`, `stage-in`, `stage-out`, `dir-create`, `cleanup`, `register` |
 | **State** | Simplified state — see [Job states](#job-states) |
 | **Exit** | Exit code when the job has completed |
 | **Duration** | Wall time from `EXECUTE` to `JOB_TERMINATED`; updates live for running jobs |
-| **Live (Condor)** | Real-time HTCondor queue status (`Idle`, `Running`, `Held`, etc.) |
+| **Args** | Task arguments from the Pegasus workflow definition (truncated to 40 chars); compute jobs only |
+| **Mem** | Peak resident memory (maxrss) from the kickstart invocation record; populated after job completion |
+| **Live** | Real-time HTCondor queue status (`Idle`, `Running`, `Held`, etc.) |
 
 ### Auxiliary Jobs
 A compact summary of non-compute jobs (stage-in/out, directory creation, cleanup, registration) grouped by type and state. Hidden when no auxiliary jobs have been seen yet.
 
 ### Recent Events
-A chronological list of the most recent job-state transitions. Each row shows the time, job name, and raw Pegasus event name. The number of rows is controlled by `--events`.
+A per-job activity summary showing the most recently active jobs, sorted by completion time (newest first). The number of rows is controlled by `--events`.
+
+| Column | Description |
+|--------|-------------|
+| **Job** | Transformation name for compute jobs, DAG node name for infrastructure jobs |
+| **State** | Simplified display state |
+| **Start** | Time the job began executing (or was submitted) |
+| **End** | Time the job terminated |
+| **Duration** | Wall-clock time from start to end; updates live for running jobs |
+| **Mem** | Peak resident memory from the kickstart invocation record |
 
 ## Event Log Format
 
@@ -358,9 +372,9 @@ When `--log` or `--serve` is active, the monitor writes a JSONL (JSON Lines) fil
 | Event type | Emitted when | Key fields |
 |------------|-------------|------------|
 | `workflow_start` | Logger initializes (first line) | `dax_label`, `user`, `planner_version`, `submit_dir`, `wf_start` |
-| `jobs_init` | First snapshot | `total_jobs`, `jobs` (list of `{job_id, exec_job_id, type_desc}`) |
+| `jobs_init` | First snapshot | `total_jobs`, `jobs` (list of `{job_id, exec_job_id, type_desc, transformation, task_argv}`) |
 | `workflow_state` | Workflow state changes | `state` (`WORKFLOW_STARTED`, `WORKFLOW_TERMINATED`), `status`, `wf_start`/`wf_end` |
-| `job_state` | A job transitions to a new state | `exec_job_id`, `type_desc`, `state`, `job_id`, `exitcode` |
+| `job_state` | A job transitions to a new state | `exec_job_id`, `type_desc`, `state`, `job_id`, `exitcode`, `stdout_file`, `stderr_file`, `maxrss` |
 | `htcondor_poll` | HTCondor queue contents or attributes change | `jobs` (list of ClassAd dicts including `HoldReason`, `JobStatus`) |
 | `workflow_end` | Monitor exits (last line) | `wf_state`, `wf_status`, `wf_end`, `total_jobs`, `done`, `failed`, `elapsed` |
 
@@ -401,7 +415,8 @@ Pegasus workflow run
         ├── braindump.yml          ← workflow metadata (UUID, submit dir, dag name)
         │
         ├── <dag>.stampede.db      ← SQLite database written by pegasus-monitord
-        │       tables: workflow, workflowstate, job, job_instance, jobstate
+        │       tables: workflow, workflowstate, job, job_instance, jobstate,
+        │               task, invocation, rc_lfn, rc_meta
         │
         └── condor_q / htcondor    ← live HTCondor queue (Python bindings or subprocess)
 ```
