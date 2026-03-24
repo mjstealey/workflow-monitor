@@ -233,8 +233,10 @@ class WorkflowSnapshot:
 class StampedeDB:
     """Read-only interface to the Pegasus stampede SQLite database."""
 
-    def __init__(self, db_path: Path):
+    def __init__(self, db_path: Path, wf_uuid: Optional[str] = None):
         self.db_path = db_path
+        self._wf_uuid = wf_uuid
+        self._wf_id: Optional[int] = None
         self._conn: Optional[sqlite3.Connection] = None
 
     # ── Connection management ─────────────────────────────────────────────────
@@ -245,6 +247,19 @@ class StampedeDB:
             uri, uri=True, timeout=5.0, check_same_thread=False
         )
         self._conn.row_factory = sqlite3.Row
+        self._resolve_wf_id()
+
+    def _resolve_wf_id(self) -> None:
+        """Look up the integer wf_id for the configured wf_uuid."""
+        if self._wf_uuid is None or self._conn is None:
+            return
+        cur = self._conn.cursor()
+        cur.execute(
+            "SELECT wf_id FROM workflow WHERE wf_uuid = ?", (self._wf_uuid,)
+        )
+        row = cur.fetchone()
+        if row:
+            self._wf_id = row["wf_id"]
 
     def close(self) -> None:
         if self._conn:
@@ -267,14 +282,26 @@ class StampedeDB:
 
     def get_workflow_state(self) -> Dict:
         cur = self._conn_or_raise().cursor()
-        cur.execute(
-            """
-            SELECT state, timestamp, status
-            FROM workflowstate
-            ORDER BY timestamp DESC
-            LIMIT 1
-            """
-        )
+        if self._wf_id is not None:
+            cur.execute(
+                """
+                SELECT state, timestamp, status
+                FROM workflowstate
+                WHERE wf_id = ?
+                ORDER BY timestamp DESC
+                LIMIT 1
+                """,
+                (self._wf_id,),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT state, timestamp, status
+                FROM workflowstate
+                ORDER BY timestamp DESC
+                LIMIT 1
+                """
+            )
         row = cur.fetchone()
         if not row:
             return {"state": "UNKNOWN", "timestamp": None, "status": None}
@@ -282,9 +309,15 @@ class StampedeDB:
 
     def get_workflow_times(self) -> Dict:
         cur = self._conn_or_raise().cursor()
-        cur.execute(
-            "SELECT state, timestamp FROM workflowstate ORDER BY timestamp"
-        )
+        if self._wf_id is not None:
+            cur.execute(
+                "SELECT state, timestamp FROM workflowstate WHERE wf_id = ? ORDER BY timestamp",
+                (self._wf_id,),
+            )
+        else:
+            cur.execute(
+                "SELECT state, timestamp FROM workflowstate ORDER BY timestamp"
+            )
         start = end = None
         for row in cur.fetchall():
             if row["state"] == "WORKFLOW_STARTED":
@@ -350,8 +383,10 @@ class StampedeDB:
             FROM job j
             LEFT JOIN latest_ji lji ON j.job_id = lji.job_id
             LEFT JOIN task t ON t.job_id = j.job_id
+            WHERE (? IS NULL OR j.wf_id = ?)
             ORDER BY j.job_id
-            """
+            """,
+            (self._wf_id, self._wf_id),
         )
         jobs = []
         for row in cur.fetchall():
@@ -396,9 +431,10 @@ class StampedeDB:
             JOIN job_instance ji ON j.job_id = ji.job_id
             JOIN jobstate js ON ji.job_instance_id = js.job_instance_id
             WHERE js.timestamp > ?
+              AND (? IS NULL OR j.wf_id = ?)
             ORDER BY js.timestamp ASC, js.jobstate_submit_seq ASC
             """,
-            (after_ts,),
+            (after_ts, self._wf_id, self._wf_id),
         )
         return [dict(row) for row in cur.fetchall()]
 
@@ -415,10 +451,11 @@ class StampedeDB:
             FROM job j
             JOIN job_instance ji ON j.job_id = ji.job_id
             JOIN jobstate js ON ji.job_instance_id = js.job_instance_id
+            WHERE (? IS NULL OR j.wf_id = ?)
             ORDER BY js.timestamp DESC, js.jobstate_submit_seq DESC
             LIMIT ?
             """,
-            (limit,),
+            (self._wf_id, self._wf_id, limit),
         )
         return [dict(row) for row in cur.fetchall()]
 

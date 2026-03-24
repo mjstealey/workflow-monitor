@@ -272,6 +272,11 @@ class RemoteEngine:
                         "submit_time": None,
                         "start_time": None,
                         "end_time": None,
+                        "transformation": j.get("transformation"),
+                        "task_argv": j.get("task_argv"),
+                        "stdout_file": None,
+                        "stderr_file": None,
+                        "maxrss": None,
                     }
 
         elif etype == "job_state":
@@ -287,6 +292,11 @@ class RemoteEngine:
                         "submit_time": None,
                         "start_time": None,
                         "end_time": None,
+                        "transformation": None,
+                        "task_argv": None,
+                        "stdout_file": None,
+                        "stderr_file": None,
+                        "maxrss": None,
                     }
                 js = self._job_state[jid]
                 state = ev.get("state")
@@ -295,6 +305,13 @@ class RemoteEngine:
                 if ev.get("exitcode") is not None:
                     from .db import real_exitcode
                     js["exitcode"] = real_exitcode(ev["exitcode"])
+                # Capture runtime metadata when present
+                if ev.get("stdout_file"):
+                    js["stdout_file"] = ev["stdout_file"]
+                if ev.get("stderr_file"):
+                    js["stderr_file"] = ev["stderr_file"]
+                if ev.get("maxrss") is not None:
+                    js["maxrss"] = ev["maxrss"]
 
                 if state == "SUBMIT" and js["submit_time"] is None:
                     js["submit_time"] = ts
@@ -366,6 +383,11 @@ class RemoteEngine:
                 start_time=js["start_time"],
                 end_time=js["end_time"],
                 _now=now,
+                transformation=js.get("transformation"),
+                task_argv=js.get("task_argv"),
+                stdout_file=js.get("stdout_file"),
+                stderr_file=js.get("stderr_file"),
+                maxrss=js.get("maxrss"),
             )
             for jid, js in sorted(self._job_state.items())
         ]

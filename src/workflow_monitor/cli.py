@@ -293,23 +293,34 @@ def main(argv: list | None = None) -> int:
         else:
             log_path = Path(args.log)
 
+    # ── Build condor constraint scoped to this workflow ───────────────────────
+    # On shared schedds, condor_q returns all users' jobs.  Restrict to jobs
+    # whose Cmd lives under this workflow's submit directory so the JSONL log
+    # (and live display) only contain relevant entries.
+    submit_dir_esc = str(info.submit_dir).replace("\\", "\\\\").replace('"', '\\"')
+    condor_constraint = (
+        f'Cmd =!= UNDEFINED'
+        f' && substr(Cmd, 0, {len(str(info.submit_dir))}) == "{submit_dir_esc}"'
+    )
+
     # ── Serve mode (headless daemon) ─────────────────────────────────────────
     if args.serve or args.serve_foreground:
         from .server import run_server
 
-        with StampedeDB(db_path) as db:
+        with StampedeDB(db_path, wf_uuid=info.wf_uuid) as db:
             run_server(
                 info=info,
                 db=db,
                 poll_interval=args.interval,
                 log_path=log_path,
                 condor_kwargs=condor_kwargs,
+                condor_constraint=condor_constraint,
                 foreground=args.serve_foreground,
             )
         return 0
 
     # ── Run monitor ───────────────────────────────────────────────────────────
-    with StampedeDB(db_path) as db:
+    with StampedeDB(db_path, wf_uuid=info.wf_uuid) as db:
         run_monitor(
             info=info,
             db=db,
@@ -317,6 +328,7 @@ def main(argv: list | None = None) -> int:
             show_all=args.all_jobs,
             events_n=args.events,
             condor_kwargs=condor_kwargs,
+            condor_constraint=condor_constraint,
             once=args.once,
             log_path=log_path,
         )
