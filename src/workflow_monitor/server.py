@@ -19,7 +19,7 @@ from typing import Optional
 from .braindump import WorkflowInfo
 from .db import StampedeDB, WorkflowSnapshot, fmt_duration
 from .event_log import EventLogger
-from .htcondor_poll import query_queue, query_history
+from .htcondor_poll import query_queue, query_history, query_slots, PoolSummary
 
 
 def _daemonize(pid_file: Path) -> None:
@@ -146,6 +146,34 @@ def run_server(
         history_last_poll = now
         return history_cache
 
+    # Pool status with throttled polling
+    pool_cache: Optional[PoolSummary] = None
+    pool_last_poll: float = 0.0
+    pool_interval = max(poll_interval * 5, 15.0)
+
+    def _poll_pool():
+        nonlocal pool_cache, pool_last_poll
+        now = time.time()
+        if now - pool_last_poll < pool_interval:
+            return pool_cache
+        try:
+            pool_kwargs = {}
+            if ck.get("collector_host"):
+                pool_kwargs["collector_host"] = ck["collector_host"]
+            if ck.get("token_path"):
+                pool_kwargs["token_path"] = ck["token_path"]
+            if ck.get("cert_path"):
+                pool_kwargs["cert_path"] = ck["cert_path"]
+            if ck.get("key_path"):
+                pool_kwargs["key_path"] = ck["key_path"]
+            if ck.get("password_file"):
+                pool_kwargs["password_file"] = ck["password_file"]
+            pool_cache = query_slots(**pool_kwargs)
+        except Exception:
+            pass
+        pool_last_poll = now
+        return pool_cache
+
     snap: Optional[WorkflowSnapshot] = None
 
     try:
@@ -153,7 +181,8 @@ def run_server(
             snap = db.snapshot()
             condor_jobs = _poll_condor()
             history = _poll_history()
-            logger.record(snap, condor_jobs, history)
+            pool = _poll_pool()
+            logger.record(snap, condor_jobs, history, pool)
 
             if snap.is_complete and not snap.is_running:
                 # One more poll for final DB flush
@@ -161,7 +190,8 @@ def run_server(
                 snap = db.snapshot()
                 condor_jobs = _poll_condor()
                 history = _poll_history()
-                logger.record(snap, condor_jobs, history)
+                pool = _poll_pool()
+                logger.record(snap, condor_jobs, history, pool)
                 break
 
             time.sleep(poll_interval)

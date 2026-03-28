@@ -12,6 +12,7 @@ from rich.live import Live
 from .braindump import WorkflowInfo
 from .db import JobRecord, WorkflowSnapshot
 from .display import build_layout
+from .htcondor_poll import PoolSummary
 
 
 class ReplayEngine:
@@ -359,6 +360,7 @@ class ReplayEngine:
         recent_events: List[Dict] = []
         condor_jobs: Optional[List[Dict]] = None
         condor_history: Optional[List[Dict]] = None
+        pool_status: Optional[PoolSummary] = None
 
         with Live(
             console=console,
@@ -376,6 +378,8 @@ class ReplayEngine:
                             condor_jobs = ev.get("jobs")
                         elif ev.get("event_type") == "htcondor_history":
                             condor_history = ev.get("jobs")
+                        elif ev.get("event_type") == "pool_status":
+                            pool_status = PoolSummary.from_dict(ev.get("pool", {}))
 
                     snap, wf_state, wf_status, wf_start, wf_end = (
                         self._reconstruct(
@@ -389,6 +393,7 @@ class ReplayEngine:
                         self._events_n, frame_ts,
                         replay_info=replay_info,
                         condor_history=condor_history,
+                        pool_status=pool_status,
                     )
                     live.update(layout)
 

@@ -34,6 +34,7 @@ from .event_log import EventLogger
 from .htcondor_poll import (
     query_queue,
     query_history,
+    query_slots,
     format_job_status,
     format_resources,
     format_transfer,
@@ -42,6 +43,7 @@ from .htcondor_poll import (
     queue_wait_seconds,
     cpu_efficiency,
     memory_efficiency,
+    PoolSummary,
 )
 
 
@@ -406,6 +408,69 @@ def _make_infra_summary(snap: WorkflowSnapshot) -> Panel:
     return Panel(table, title="[bold]Auxiliary Jobs[/bold]", padding=(0, 0))
 
 
+# ─── Pool resources panel ────────────────────────────────────────────────
+
+def _make_pool_panel(pool: PoolSummary) -> Panel:
+    table = Table(box=None, show_header=False, padding=(0, 1), expand=True)
+    table.add_column("Label", style="dim", no_wrap=True)
+    table.add_column("Value", style="white", no_wrap=True, justify="right")
+
+    # Machines
+    table.add_row("Machines", str(pool.machines))
+
+    # Slots: claimed/idle/total
+    slot_text = Text()
+    if pool.claimed_slots:
+        slot_text.append(f"{pool.claimed_slots}", style="cyan")
+        slot_text.append("/", style="dim")
+    slot_text.append(f"{pool.total_slots}", style="white")
+    if pool.idle_slots:
+        slot_text.append(f" ({pool.idle_slots} idle)", style="dim green")
+    table.add_row("Slots", slot_text)
+
+    # CPUs
+    cpu_text = Text()
+    used = pool.total_cpus - pool.idle_cpus
+    if used > 0:
+        cpu_text.append(f"{used}", style="cyan")
+        cpu_text.append("/", style="dim")
+    cpu_text.append(f"{pool.total_cpus}", style="white")
+    if pool.idle_cpus > 0:
+        cpu_text.append(f" ({pool.idle_cpus} idle)", style="dim green")
+    table.add_row("CPUs", cpu_text)
+
+    # Memory
+    total_gb = pool.total_memory_mb / 1024
+    idle_gb = pool.idle_memory_mb / 1024
+    mem_text = Text()
+    used_gb = total_gb - idle_gb
+    if used_gb > 0.1:
+        mem_text.append(f"{used_gb:.1f}", style="cyan")
+        mem_text.append("/", style="dim")
+    mem_text.append(f"{total_gb:.1f}G", style="white")
+    if idle_gb > 0.1:
+        mem_text.append(f" ({idle_gb:.1f}G free)", style="dim green")
+    table.add_row("Memory", mem_text)
+
+    # GPUs (only if any exist)
+    if pool.total_gpus > 0:
+        gpu_text = Text()
+        used_gpus = pool.total_gpus - pool.idle_gpus
+        if used_gpus > 0:
+            gpu_text.append(f"{used_gpus}", style="cyan")
+            gpu_text.append("/", style="dim")
+        gpu_text.append(f"{pool.total_gpus}", style="white")
+        if pool.idle_gpus > 0:
+            gpu_text.append(f" ({pool.idle_gpus} idle)", style="dim green")
+        table.add_row("GPUs", gpu_text)
+
+    # OS/Arch
+    if pool.os_arch:
+        table.add_row("Platform", Text(pool.os_arch, style="dim"))
+
+    return Panel(table, title="[bold]Pool Resources[/bold]", padding=(0, 0))
+
+
 # ─── Diagnostics panel ────────────────────────────────────────────────────
 
 def _make_diagnostics_panel(
@@ -502,6 +567,7 @@ def build_layout(
     remote_info: Optional[dict] = None,
     submit_dir: Optional[Path] = None,
     condor_history: Optional[List] = None,
+    pool_status: Optional[PoolSummary] = None,
 ) -> Layout:
     has_issues = snap.held_count() > 0 or snap.failed_count() > 0
 
@@ -523,17 +589,31 @@ def build_layout(
     parts.append(Layout(name="events", size=events_n + 3))
     layout.split_column(*parts)
 
-    layout["main"].split_row(
-        Layout(name="jobs", ratio=3),
-        Layout(name="infra", ratio=1),
-    )
+    # Build the right-side column: infra summary + optional pool resources
+    if pool_status is not None:
+        right_col = Layout(name="right_col")
+        right_col.split_column(
+            Layout(name="infra", ratio=1),
+            Layout(name="pool", size=pool_status.total_gpus > 0 and 9 or 8),
+        )
+        layout["main"].split_row(
+            Layout(name="jobs", ratio=3),
+            right_col,
+        )
+        right_col["infra"].update(_make_infra_summary(snap))
+        right_col["pool"].update(_make_pool_panel(pool_status))
+    else:
+        layout["main"].split_row(
+            Layout(name="jobs", ratio=3),
+            Layout(name="infra", ratio=1),
+        )
+        layout["infra"].update(_make_infra_summary(snap))
 
     layout["header"].update(_make_header(info, snap, refresh_ts, replay_info=replay_info, remote_info=remote_info))
     layout["status"].update(_make_status_bar(snap))
     if has_issues:
         layout["diagnostics"].update(_make_diagnostics_panel(snap, condor_jobs=condor_jobs, submit_dir=submit_dir))
     layout["jobs"].update(_make_job_table(snap, show_all=show_all, condor_jobs=condor_jobs, condor_history=condor_history))
-    layout["infra"].update(_make_infra_summary(snap))
     layout["events"].update(_make_events_panel(snap, n=events_n))
 
     return layout
@@ -610,17 +690,47 @@ def run_monitor(
         _history_last_poll = now
         return _history_cache
 
+    # Pool status cache: polled less frequently (~15s)
+    _pool_cache: Optional[PoolSummary] = None
+    _pool_last_poll: float = 0.0
+    _POOL_INTERVAL = max(poll_interval * 5, 15.0)
+
+    def _poll_pool() -> Optional[PoolSummary]:
+        nonlocal _pool_cache, _pool_last_poll
+        now = time.time()
+        if now - _pool_last_poll < _POOL_INTERVAL:
+            return _pool_cache
+        try:
+            # Pool query uses collector_host but no per-workflow constraint
+            pool_kwargs = {}
+            if ck.get("collector_host"):
+                pool_kwargs["collector_host"] = ck["collector_host"]
+            if ck.get("token_path"):
+                pool_kwargs["token_path"] = ck["token_path"]
+            if ck.get("cert_path"):
+                pool_kwargs["cert_path"] = ck["cert_path"]
+            if ck.get("key_path"):
+                pool_kwargs["key_path"] = ck["key_path"]
+            if ck.get("password_file"):
+                pool_kwargs["password_file"] = ck["password_file"]
+            _pool_cache = query_slots(**pool_kwargs)
+        except Exception:
+            pass
+        _pool_last_poll = now
+        return _pool_cache
+
     def _refresh() -> tuple:
         snap = db.snapshot()
         condor_jobs = _poll_condor()
         history = _poll_history()
+        pool = _poll_pool()
         ts = time.time()
         if logger is not None:
-            logger.record(snap, condor_jobs, history)
-        return snap, condor_jobs, history, ts
+            logger.record(snap, condor_jobs, history, pool)
+        return snap, condor_jobs, history, pool, ts
 
     if once:
-        snap, condor_jobs, history, ts = _refresh()
+        snap, condor_jobs, history, pool, ts = _refresh()
         console.print(_make_header(info, snap, ts))
         console.print(_make_status_bar(snap))
         if snap.held_count() > 0 or snap.failed_count() > 0:
@@ -628,6 +738,8 @@ def run_monitor(
         console.print(_make_job_table(snap, show_all=show_all, condor_jobs=condor_jobs, condor_history=history))
         if snap.infra_jobs():
             console.print(_make_infra_summary(snap))
+        if pool is not None:
+            console.print(_make_pool_panel(pool))
         console.print(_make_events_panel(snap, n=events_n))
         _print_final_summary(console, snap, condor_jobs=condor_jobs, submit_dir=info.submit_dir)
         if logger is not None:
@@ -642,22 +754,24 @@ def run_monitor(
     ) as live:
         try:
             while True:
-                snap, condor_jobs, history, ts = _refresh()
+                snap, condor_jobs, history, pool, ts = _refresh()
                 layout = build_layout(
                     info, snap, show_all, condor_jobs, events_n, ts,
                     submit_dir=info.submit_dir,
                     condor_history=history,
+                    pool_status=pool,
                 )
                 live.update(layout)
 
                 if snap.is_complete and not snap.is_running:
                     # Give one extra beat for final DB flush from monitord
                     time.sleep(poll_interval)
-                    snap, condor_jobs, history, ts = _refresh()
+                    snap, condor_jobs, history, pool, ts = _refresh()
                     live.update(
                         build_layout(info, snap, show_all, condor_jobs, events_n, ts,
                                      submit_dir=info.submit_dir,
-                                     condor_history=history)
+                                     condor_history=history,
+                                     pool_status=pool)
                     )
                     break
 

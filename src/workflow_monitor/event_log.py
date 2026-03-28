@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 
 from .braindump import WorkflowInfo
 from .db import StampedeDB, WorkflowSnapshot
+from .htcondor_poll import PoolSummary
 
 
 class EventLogger:
@@ -40,6 +41,7 @@ class EventLogger:
         self._last_wf_state: Optional[str] = None
         self._last_condor_fingerprint: frozenset[tuple] = frozenset()
         self._last_history_fingerprint: frozenset[tuple] = frozenset()
+        self._last_pool_fingerprint: Optional[str] = None
         self._jobs_init_emitted: bool = False
         self._resumed: bool = False
 
@@ -99,6 +101,9 @@ class EventLogger:
                         jobs = ev.get("jobs", [])
                         self._last_history_fingerprint = self._history_fingerprint(jobs)
 
+                    elif etype == "pool_status":
+                        self._last_pool_fingerprint = self._pool_fingerprint(ev.get("pool", {}))
+
                     elif etype == "workflow_end":
                         last_end_offset = offset
 
@@ -150,6 +155,7 @@ class EventLogger:
         snapshot: WorkflowSnapshot,
         condor_jobs: Optional[List[Dict]] = None,
         condor_history: Optional[List[Dict]] = None,
+        pool_status: Optional[PoolSummary] = None,
     ) -> None:
         """Record new events from the latest poll cycle."""
         if not self._jobs_init_emitted:
@@ -159,6 +165,7 @@ class EventLogger:
         self._record_job_events()
         self._record_condor_poll(condor_jobs)
         self._record_condor_history(condor_history)
+        self._record_pool_status(pool_status)
 
     def close(self, snapshot: Optional[WorkflowSnapshot] = None) -> None:
         """Write a workflow_end event and close the file."""
@@ -298,3 +305,27 @@ class EventLogger:
                 "jobs": condor_history,
             })
             self._last_history_fingerprint = fp
+
+    @staticmethod
+    def _pool_fingerprint(pool_dict: Dict) -> str:
+        """Build a fingerprint for pool status based on slot counts."""
+        return (
+            f"{pool_dict.get('total_slots', 0)}:"
+            f"{pool_dict.get('claimed_slots', 0)}:"
+            f"{pool_dict.get('idle_slots', 0)}:"
+            f"{pool_dict.get('total_cpus', 0)}:"
+            f"{pool_dict.get('idle_cpus', 0)}"
+        )
+
+    def _record_pool_status(self, pool: Optional["PoolSummary"]) -> None:
+        if pool is None:
+            return
+        pool_dict = pool.to_dict()
+        fp = self._pool_fingerprint(pool_dict)
+        if fp != self._last_pool_fingerprint:
+            self._emit({
+                "event_type": "pool_status",
+                "timestamp": time.time(),
+                "pool": pool_dict,
+            })
+            self._last_pool_fingerprint = fp
