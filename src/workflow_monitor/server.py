@@ -19,7 +19,7 @@ from typing import Optional
 from .braindump import WorkflowInfo
 from .db import StampedeDB, WorkflowSnapshot, fmt_duration
 from .event_log import EventLogger
-from .htcondor_poll import query_queue
+from .htcondor_poll import query_queue, query_history
 
 
 def _daemonize(pid_file: Path) -> None:
@@ -123,20 +123,45 @@ def run_server(
         except Exception:
             return []
 
+    # History cache with throttled polling
+    history_cache: list = []
+    history_last_poll: float = 0.0
+    history_interval = max(poll_interval * 3, 10.0)
+
+    def _poll_history():
+        nonlocal history_cache, history_last_poll
+        now = time.time()
+        if now - history_last_poll < history_interval:
+            return history_cache
+        try:
+            result = query_history(constraint=condor_constraint, **ck)
+            if result:
+                seen = {h.get("ClusterId") for h in history_cache}
+                for h in result:
+                    if h.get("ClusterId") not in seen:
+                        history_cache.append(h)
+                        seen.add(h.get("ClusterId"))
+        except Exception:
+            pass
+        history_last_poll = now
+        return history_cache
+
     snap: Optional[WorkflowSnapshot] = None
 
     try:
         while not shutdown:
             snap = db.snapshot()
             condor_jobs = _poll_condor()
-            logger.record(snap, condor_jobs)
+            history = _poll_history()
+            logger.record(snap, condor_jobs, history)
 
             if snap.is_complete and not snap.is_running:
                 # One more poll for final DB flush
                 time.sleep(poll_interval)
                 snap = db.snapshot()
                 condor_jobs = _poll_condor()
-                logger.record(snap, condor_jobs)
+                history = _poll_history()
+                logger.record(snap, condor_jobs, history)
                 break
 
             time.sleep(poll_interval)

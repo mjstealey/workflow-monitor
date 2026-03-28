@@ -33,10 +33,15 @@ from .diagnostics import collect_diagnostics
 from .event_log import EventLogger
 from .htcondor_poll import (
     query_queue,
+    query_history,
     format_job_status,
     format_resources,
     format_transfer,
+    format_efficiency,
+    format_disk_usage,
     queue_wait_seconds,
+    cpu_efficiency,
+    memory_efficiency,
 )
 
 
@@ -185,6 +190,7 @@ def _make_job_table(
     snap: WorkflowSnapshot,
     show_all: bool = False,
     condor_jobs: Optional[List] = None,
+    condor_history: Optional[List] = None,
 ) -> Panel:
     # Build a condor lookup by DAGNodeName -> status
     condor_map: dict = {}
@@ -193,6 +199,14 @@ def _make_job_table(
             node = cj.get("DAGNodeName", "")
             if node:
                 condor_map[node] = cj
+
+    # Build a history lookup by DAGNodeName -> ClassAd
+    history_map: dict = {}
+    if condor_history:
+        for hj in condor_history:
+            node = hj.get("DAGNodeName", "")
+            if node:
+                history_map[node] = hj
 
     jobs_to_show = snap.jobs if show_all else snap.compute_jobs()
 
@@ -232,15 +246,16 @@ def _make_job_table(
 
         mem_cell = Text(fmt_memory(job.maxrss), style="dim")
 
-        # Condor live info
+        # Condor live info (queue) or history (completed)
         condor_info = condor_map.get(job.exec_job_id, {})
+        hist_info = history_map.get(job.exec_job_id, {})
         req_cell = Text("", style="dim")
         if condor_info:
+            # Job is still in the queue — show live status
             live_parts = []
             live_parts.append(format_job_status(condor_info.get("JobStatus")))
             host = condor_info.get("RemoteHost", "")
             if host:
-                # Shorten slot1@machine.local -> slot1@machine
                 short_host = host.split(".")[0] if "." in host else host
                 live_parts.append(short_host)
             restarts = condor_info.get("NumJobStarts")
@@ -254,6 +269,33 @@ def _make_job_table(
                 live_parts.append(f"io:{xfer}")
             live_cell = Text(" ".join(live_parts), style="cyan")
             req_cell = Text(format_resources(condor_info), style="dim")
+        elif hist_info:
+            # Job completed — show post-completion metrics from history
+            live_parts = []
+            host = hist_info.get("LastRemoteHost", "")
+            if host:
+                short_host = host.split(".")[0] if "." in host else host
+                live_parts.append(short_host)
+            eff = cpu_efficiency(hist_info)
+            if eff is not None:
+                eff_style = (
+                    "green" if eff >= 0.7 else "yellow" if eff >= 0.3 else "red"
+                )
+                live_parts.append(f"cpu:{format_efficiency(eff)}")
+            mem_eff = memory_efficiency(hist_info)
+            if mem_eff is not None:
+                live_parts.append(f"mem:{format_efficiency(mem_eff)}")
+            disk = hist_info.get("DiskUsage")
+            if disk:
+                live_parts.append(f"disk:{format_disk_usage(disk)}")
+            xfer = format_transfer(hist_info)
+            if xfer:
+                live_parts.append(f"io:{xfer}")
+            restarts = hist_info.get("NumJobStarts")
+            if restarts is not None and int(restarts) > 1:
+                live_parts.append(f"try#{int(restarts)}")
+            live_cell = Text(" ".join(live_parts), style="dim green")
+            req_cell = Text(format_resources(hist_info), style="dim")
         else:
             live_cell = Text("", style="dim")
 
@@ -459,6 +501,7 @@ def build_layout(
     replay_info: Optional[dict] = None,
     remote_info: Optional[dict] = None,
     submit_dir: Optional[Path] = None,
+    condor_history: Optional[List] = None,
 ) -> Layout:
     has_issues = snap.held_count() > 0 or snap.failed_count() > 0
 
@@ -489,7 +532,7 @@ def build_layout(
     layout["status"].update(_make_status_bar(snap))
     if has_issues:
         layout["diagnostics"].update(_make_diagnostics_panel(snap, condor_jobs=condor_jobs, submit_dir=submit_dir))
-    layout["jobs"].update(_make_job_table(snap, show_all=show_all, condor_jobs=condor_jobs))
+    layout["jobs"].update(_make_job_table(snap, show_all=show_all, condor_jobs=condor_jobs, condor_history=condor_history))
     layout["infra"].update(_make_infra_summary(snap))
     layout["events"].update(_make_events_panel(snap, n=events_n))
 
@@ -541,21 +584,48 @@ def run_monitor(
         except Exception:
             return []
 
+    # History cache: accumulates completed job records, refreshed every
+    # few poll cycles to avoid hammering condor_history each second.
+    _history_cache: List = []
+    _history_last_poll: float = 0.0
+    _HISTORY_INTERVAL = max(poll_interval * 3, 10.0)  # at least 10s
+
+    def _poll_history() -> List:
+        nonlocal _history_cache, _history_last_poll
+        now = time.time()
+        if now - _history_last_poll < _HISTORY_INTERVAL:
+            return _history_cache
+        try:
+            result = query_history(constraint=condor_constraint, **ck)
+            if result:
+                # Merge into cache (dedup by ClusterId)
+                seen = {h.get("ClusterId") for h in _history_cache}
+                for h in result:
+                    cid = h.get("ClusterId")
+                    if cid not in seen:
+                        _history_cache.append(h)
+                        seen.add(cid)
+        except Exception:
+            pass
+        _history_last_poll = now
+        return _history_cache
+
     def _refresh() -> tuple:
         snap = db.snapshot()
         condor_jobs = _poll_condor()
+        history = _poll_history()
         ts = time.time()
         if logger is not None:
-            logger.record(snap, condor_jobs)
-        return snap, condor_jobs, ts
+            logger.record(snap, condor_jobs, history)
+        return snap, condor_jobs, history, ts
 
     if once:
-        snap, condor_jobs, ts = _refresh()
+        snap, condor_jobs, history, ts = _refresh()
         console.print(_make_header(info, snap, ts))
         console.print(_make_status_bar(snap))
         if snap.held_count() > 0 or snap.failed_count() > 0:
             console.print(_make_diagnostics_panel(snap, condor_jobs=condor_jobs, submit_dir=info.submit_dir))
-        console.print(_make_job_table(snap, show_all=show_all, condor_jobs=condor_jobs))
+        console.print(_make_job_table(snap, show_all=show_all, condor_jobs=condor_jobs, condor_history=history))
         if snap.infra_jobs():
             console.print(_make_infra_summary(snap))
         console.print(_make_events_panel(snap, n=events_n))
@@ -572,20 +642,22 @@ def run_monitor(
     ) as live:
         try:
             while True:
-                snap, condor_jobs, ts = _refresh()
+                snap, condor_jobs, history, ts = _refresh()
                 layout = build_layout(
                     info, snap, show_all, condor_jobs, events_n, ts,
                     submit_dir=info.submit_dir,
+                    condor_history=history,
                 )
                 live.update(layout)
 
                 if snap.is_complete and not snap.is_running:
                     # Give one extra beat for final DB flush from monitord
                     time.sleep(poll_interval)
-                    snap, condor_jobs, ts = _refresh()
+                    snap, condor_jobs, history, ts = _refresh()
                     live.update(
                         build_layout(info, snap, show_all, condor_jobs, events_n, ts,
-                                     submit_dir=info.submit_dir)
+                                     submit_dir=info.submit_dir,
+                                     condor_history=history)
                     )
                     break
 

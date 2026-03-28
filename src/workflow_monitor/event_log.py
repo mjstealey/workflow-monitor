@@ -39,6 +39,7 @@ class EventLogger:
         self._high_water_ts: float = 0.0
         self._last_wf_state: Optional[str] = None
         self._last_condor_fingerprint: frozenset[tuple] = frozenset()
+        self._last_history_fingerprint: frozenset[tuple] = frozenset()
         self._jobs_init_emitted: bool = False
         self._resumed: bool = False
 
@@ -94,6 +95,10 @@ class EventLogger:
                         jobs = ev.get("jobs", [])
                         self._last_condor_fingerprint = self._condor_fingerprint(jobs)
 
+                    elif etype == "htcondor_history":
+                        jobs = ev.get("jobs", [])
+                        self._last_history_fingerprint = self._history_fingerprint(jobs)
+
                     elif etype == "workflow_end":
                         last_end_offset = offset
 
@@ -144,6 +149,7 @@ class EventLogger:
         self,
         snapshot: WorkflowSnapshot,
         condor_jobs: Optional[List[Dict]] = None,
+        condor_history: Optional[List[Dict]] = None,
     ) -> None:
         """Record new events from the latest poll cycle."""
         if not self._jobs_init_emitted:
@@ -152,6 +158,7 @@ class EventLogger:
         self._record_workflow_state(snapshot)
         self._record_job_events()
         self._record_condor_poll(condor_jobs)
+        self._record_condor_history(condor_history)
 
     def close(self, snapshot: Optional[WorkflowSnapshot] = None) -> None:
         """Write a workflow_end event and close the file."""
@@ -270,3 +277,24 @@ class EventLogger:
                 "jobs": condor_jobs,
             })
             self._last_condor_fingerprint = fp
+
+    @staticmethod
+    def _history_fingerprint(jobs: List[Dict]) -> frozenset:
+        """Build a fingerprint for history records (keyed by ClusterId)."""
+        parts = []
+        for hj in jobs:
+            key = str(hj.get("ClusterId", ""))
+            parts.append(key)
+        return frozenset(parts)
+
+    def _record_condor_history(self, condor_history: Optional[List[Dict]]) -> None:
+        if not condor_history:
+            return
+        fp = self._history_fingerprint(condor_history)
+        if fp != self._last_history_fingerprint:
+            self._emit({
+                "event_type": "htcondor_history",
+                "timestamp": time.time(),
+                "jobs": condor_history,
+            })
+            self._last_history_fingerprint = fp

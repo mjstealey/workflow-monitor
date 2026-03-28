@@ -358,6 +358,7 @@ class ReplayEngine:
         wf_end: Optional[float] = None
         recent_events: List[Dict] = []
         condor_jobs: Optional[List[Dict]] = None
+        condor_history: Optional[List[Dict]] = None
 
         with Live(
             console=console,
@@ -369,10 +370,12 @@ class ReplayEngine:
                 for i, frame in enumerate(frames):
                     frame_ts = float(frame[0].get("timestamp", time.time()))
 
-                    # Extract condor jobs from htcondor_poll events in this frame
+                    # Extract condor data from events in this frame
                     for ev in frame:
                         if ev.get("event_type") == "htcondor_poll":
                             condor_jobs = ev.get("jobs")
+                        elif ev.get("event_type") == "htcondor_history":
+                            condor_history = ev.get("jobs")
 
                     snap, wf_state, wf_status, wf_start, wf_end = (
                         self._reconstruct(
@@ -385,6 +388,7 @@ class ReplayEngine:
                         info, snap, show_all, condor_jobs,
                         self._events_n, frame_ts,
                         replay_info=replay_info,
+                        condor_history=condor_history,
                     )
                     live.update(layout)
 

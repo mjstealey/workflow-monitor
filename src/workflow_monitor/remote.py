@@ -185,6 +185,7 @@ class RemoteEngine:
         self._processed_lines: int = 0
         self._workflow_complete: bool = False
         self._condor_jobs: Optional[List[Dict]] = None
+        self._condor_history: Optional[List[Dict]] = None
         self._pending_workflow_end: Optional[Dict[str, Any]] = None
 
     def _do_sync(self) -> tuple[bool, str]:
@@ -330,6 +331,9 @@ class RemoteEngine:
         elif etype == "htcondor_poll":
             self._condor_jobs = ev.get("jobs")
 
+        elif etype == "htcondor_history":
+            self._condor_history = ev.get("jobs")
+
         elif etype == "workflow_end":
             # Defer marking complete — a resumed server may append events
             # after a prior workflow_end.  We mark complete only in
@@ -457,7 +461,7 @@ class RemoteEngine:
             console.print(_make_status_bar(snap))
             if snap.held_count() > 0 or snap.failed_count() > 0:
                 console.print(_make_diagnostics_panel(snap, condor_jobs=self._condor_jobs))
-            console.print(_make_job_table(snap, show_all=show_all, condor_jobs=self._condor_jobs))
+            console.print(_make_job_table(snap, show_all=show_all, condor_jobs=self._condor_jobs, condor_history=self._condor_history))
             if snap.infra_jobs():
                 console.print(_make_infra_summary(snap))
             console.print(_make_events_panel(snap, n=self._events_n))
@@ -486,6 +490,7 @@ class RemoteEngine:
                         info, snap, show_all, self._condor_jobs,
                         self._events_n, snap.poll_time,
                         remote_info=remote_info,
+                        condor_history=self._condor_history,
                     )
                     live.update(layout)
 
