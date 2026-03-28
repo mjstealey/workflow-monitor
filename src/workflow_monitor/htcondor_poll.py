@@ -71,9 +71,18 @@ def _try_python_bindings(
                 schedd = ht.Schedd()
 
             projection = [
+                # Identity & status
                 "ClusterId", "ProcId", "JobStatus",
-                "Cmd", "RemoteHost", "QDate", "DAGNodeName",
-                "Owner", "HoldReason", "HoldReasonCode",
+                "Cmd", "RemoteHost", "QDate", "JobStartDate",
+                "DAGNodeName", "Owner",
+                "HoldReason", "HoldReasonCode",
+                # Resource requests (Tier 1)
+                "RequestCpus", "RequestMemory", "RequestDisk",
+                "RequestGpus",
+                "ImageSize", "NumJobStarts", "AccountingGroup",
+                # File transfer & I/O (Tier 2)
+                "TransferInputSizeMB",
+                "BytesSent", "BytesRecvd",
             ]
             q_args: Dict[str, Any] = {"projection": projection}
             if constraint:
@@ -89,12 +98,25 @@ def _try_python_bindings(
 
 # ─── subprocess fallback ──────────────────────────────────────────────────────
 
+_SUBPROCESS_ATTRS = [
+    "ClusterId", "ProcId", "JobStatus",
+    "Cmd", "RemoteHost", "QDate", "JobStartDate",
+    "DAGNodeName", "Owner",
+    "HoldReason", "HoldReasonCode",
+    "RequestCpus", "RequestMemory", "RequestDisk",
+    "RequestGpus",
+    "ImageSize", "NumJobStarts", "AccountingGroup",
+    "TransferInputSizeMB",
+    "BytesSent", "BytesRecvd",
+]
+
+
 def _query_via_subprocess(
     constraint: Optional[str] = None,
     schedd_name: Optional[str] = None,
 ) -> List[Dict]:
     """Query HTCondor queue via ``condor_q -json``."""
-    cmd = ["condor_q", "-json"]
+    cmd = ["condor_q", "-json", "-attributes", ",".join(_SUBPROCESS_ATTRS)]
     if schedd_name:
         cmd += ["-name", schedd_name]
     if constraint:
@@ -170,3 +192,48 @@ def format_job_status(status_code: Any) -> str:
         return JOB_STATUS.get(int(status_code), str(status_code))
     except (TypeError, ValueError):
         return str(status_code)
+
+
+def format_resources(ad: Dict) -> str:
+    """Format resource requests as a compact string like '2c/4G' or '1c/2G/1gpu'."""
+    parts = []
+    cpus = ad.get("RequestCpus")
+    if cpus is not None:
+        parts.append(f"{int(cpus)}c")
+    mem = ad.get("RequestMemory")
+    if mem is not None:
+        mem_mb = int(mem)
+        if mem_mb >= 1024:
+            parts.append(f"{mem_mb / 1024:.1f}G")
+        else:
+            parts.append(f"{mem_mb}M")
+    gpus = ad.get("RequestGpus")
+    if gpus is not None and int(gpus) > 0:
+        parts.append(f"{int(gpus)}gpu")
+    return "/".join(parts) if parts else ""
+
+
+def format_transfer(ad: Dict) -> str:
+    """Format transfer bytes as compact string."""
+    sent = ad.get("BytesSent", 0) or 0
+    recvd = ad.get("BytesRecvd", 0) or 0
+    total = sent + recvd
+    if total == 0:
+        return ""
+    if total < 1024:
+        return f"{total}B"
+    if total < 1024 * 1024:
+        return f"{total / 1024:.1f}K"
+    if total < 1024 * 1024 * 1024:
+        return f"{total / (1024 * 1024):.1f}M"
+    return f"{total / (1024 * 1024 * 1024):.2f}G"
+
+
+def queue_wait_seconds(ad: Dict) -> Optional[float]:
+    """Compute how long the job waited in queue before starting."""
+    qdate = ad.get("QDate")
+    start = ad.get("JobStartDate")
+    if qdate is not None and start is not None:
+        wait = float(start) - float(qdate)
+        return max(0.0, wait)
+    return None

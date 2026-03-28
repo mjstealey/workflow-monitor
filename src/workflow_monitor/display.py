@@ -31,7 +31,13 @@ from .db import (
 )
 from .diagnostics import collect_diagnostics
 from .event_log import EventLogger
-from .htcondor_poll import query_queue, format_job_status
+from .htcondor_poll import (
+    query_queue,
+    format_job_status,
+    format_resources,
+    format_transfer,
+    queue_wait_seconds,
+)
 
 
 # ─── Workflow state styling ───────────────────────────────────────────────────
@@ -204,6 +210,7 @@ def _make_job_table(
     table.add_column("Duration", justify="right", no_wrap=True, ratio=1)
     table.add_column("Args", style="dim", ratio=2, no_wrap=True, max_width=40)
     table.add_column("Mem", justify="right", style="dim", no_wrap=True, width=7)
+    table.add_column("Req", style="dim", no_wrap=True, width=12)
     table.add_column("Live", style="dim", ratio=1, no_wrap=True)
 
     for job in jobs_to_show:
@@ -227,9 +234,26 @@ def _make_job_table(
 
         # Condor live info
         condor_info = condor_map.get(job.exec_job_id, {})
+        req_cell = Text("", style="dim")
         if condor_info:
-            live = format_job_status(condor_info.get("JobStatus"))
-            live_cell = Text(live, style="cyan")
+            live_parts = []
+            live_parts.append(format_job_status(condor_info.get("JobStatus")))
+            host = condor_info.get("RemoteHost", "")
+            if host:
+                # Shorten slot1@machine.local -> slot1@machine
+                short_host = host.split(".")[0] if "." in host else host
+                live_parts.append(short_host)
+            restarts = condor_info.get("NumJobStarts")
+            if restarts is not None and int(restarts) > 1:
+                live_parts.append(f"try#{int(restarts)}")
+            wait = queue_wait_seconds(condor_info)
+            if wait is not None and wait > 0:
+                live_parts.append(f"wait:{fmt_duration(wait)}")
+            xfer = format_transfer(condor_info)
+            if xfer:
+                live_parts.append(f"io:{xfer}")
+            live_cell = Text(" ".join(live_parts), style="cyan")
+            req_cell = Text(format_resources(condor_info), style="dim")
         else:
             live_cell = Text("", style="dim")
 
@@ -243,13 +267,14 @@ def _make_job_table(
             dur_cell,
             argv_cell,
             mem_cell,
+            req_cell,
             live_cell,
         )
 
     if not jobs_to_show:
         table.add_row(
             Text("(no jobs yet)", style="dim italic"),
-            "", "", "", "", "", "", "",
+            "", "", "", "", "", "", "", "",
         )
 
     title = "[bold]Compute Jobs[/bold]" if not show_all else "[bold]All Jobs[/bold]"

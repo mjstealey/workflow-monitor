@@ -245,15 +245,18 @@ class EventLogger:
     def _condor_fingerprint(jobs: List[Dict]) -> frozenset:
         """Build a fingerprint that captures job identity AND key attributes.
 
-        This ensures an htcondor_poll event is emitted when a job's status
-        or hold reason changes, not just when the set of job IDs changes.
+        This ensures an htcondor_poll event is emitted when a job's status,
+        hold reason, host assignment, or transfer progress changes.
         """
         parts = []
         for cj in jobs:
             key = cj.get("ClusterId", cj.get("DAGNodeName", ""))
             status = cj.get("JobStatus", "")
             hold = cj.get("HoldReason", "")
-            parts.append((str(key), str(status), hold))
+            host = cj.get("RemoteHost", "")
+            sent = str(cj.get("BytesSent", ""))
+            recvd = str(cj.get("BytesRecvd", ""))
+            parts.append((str(key), str(status), hold, host, sent, recvd))
         return frozenset(parts)
 
     def _record_condor_poll(self, condor_jobs: Optional[List[Dict]]) -> None:
