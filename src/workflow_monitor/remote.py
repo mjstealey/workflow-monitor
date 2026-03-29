@@ -20,8 +20,9 @@ from rich.live import Live
 
 from .braindump import WorkflowInfo
 from .db import JobRecord, WorkflowSnapshot
-from .display import build_layout
+from .display import build_layout, _print_final_summary
 from .htcondor_poll import PoolSummary
+from .stats import WorkflowStats, compute_workflow_stats
 
 
 def _parse_remote_spec(spec: str) -> tuple[str, str]:
@@ -188,6 +189,7 @@ class RemoteEngine:
         self._condor_jobs: Optional[List[Dict]] = None
         self._condor_history: Optional[List[Dict]] = None
         self._pool_status: Optional[PoolSummary] = None
+        self._workflow_stats: Optional[WorkflowStats] = None
         self._pending_workflow_end: Optional[Dict[str, Any]] = None
 
     def _do_sync(self) -> tuple[bool, str]:
@@ -339,6 +341,9 @@ class RemoteEngine:
         elif etype == "pool_status":
             self._pool_status = PoolSummary.from_dict(ev.get("pool", {}))
 
+        elif etype == "workflow_stats":
+            self._workflow_stats = WorkflowStats.from_dict(ev.get("stats", {}))
+
         elif etype == "workflow_end":
             # Defer marking complete — a resumed server may append events
             # after a prior workflow_end.  We mark complete only in
@@ -460,7 +465,6 @@ class RemoteEngine:
                 _make_infra_summary,
                 _make_pool_panel,
                 _make_events_panel,
-                _print_final_summary,
             )
 
             console.print(_make_header(info, snap, snap.poll_time, remote_info=remote_info))
@@ -473,7 +477,8 @@ class RemoteEngine:
             if self._pool_status is not None:
                 console.print(_make_pool_panel(self._pool_status))
             console.print(_make_events_panel(snap, n=self._events_n))
-            _print_final_summary(console, snap, condor_jobs=self._condor_jobs)
+            stats = self._workflow_stats or compute_workflow_stats(snap)
+            _print_final_summary(console, snap, condor_jobs=self._condor_jobs, stats=stats)
             self._cleanup()
             return
 
@@ -522,22 +527,9 @@ class RemoteEngine:
             except KeyboardInterrupt:
                 pass
 
-        # Final summary
-        console.print()
-        if snap.succeeded:
-            console.print(
-                "[bold green]✔ Remote workflow completed successfully[/bold green]"
-            )
-        elif snap.failed:
-            console.print(
-                "[bold red]✖ Remote workflow FAILED[/bold red]"
-            )
-        else:
-            console.print(
-                f"[yellow]◌ Remote monitoring stopped[/yellow]  "
-                f"(state: {snap.wf_state})"
-            )
-        console.print()
+        # Final summary — use unified stats display
+        stats = self._workflow_stats or compute_workflow_stats(snap)
+        _print_final_summary(console, snap, condor_jobs=self._condor_jobs, stats=stats)
 
         self._cleanup()
 

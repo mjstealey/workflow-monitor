@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 from .braindump import WorkflowInfo
 from .db import StampedeDB, WorkflowSnapshot
 from .htcondor_poll import PoolSummary
+from .stats import compute_workflow_stats
 
 
 class EventLogger:
@@ -167,8 +168,22 @@ class EventLogger:
         self._record_condor_history(condor_history)
         self._record_pool_status(pool_status)
 
-    def close(self, snapshot: Optional[WorkflowSnapshot] = None) -> None:
-        """Write a workflow_end event and close the file."""
+    def close(
+        self,
+        snapshot: Optional[WorkflowSnapshot] = None,
+        condor_history: Optional[List[Dict]] = None,
+        pool_status: Optional[PoolSummary] = None,
+    ) -> None:
+        """Emit workflow_stats and workflow_end events, then close the file."""
+        # Emit analytics summary before the end marker
+        if snapshot is not None:
+            wf_stats = compute_workflow_stats(snapshot, condor_history, pool_status)
+            self._emit({
+                "event_type": "workflow_stats",
+                "timestamp": time.time(),
+                "stats": wf_stats.to_dict(),
+            })
+
         end_event: Dict[str, Any] = {
             "event_type": "workflow_end",
             "timestamp": time.time(),

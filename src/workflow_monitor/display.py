@@ -31,6 +31,7 @@ from .db import (
 )
 from .diagnostics import collect_diagnostics
 from .event_log import EventLogger
+from .stats import WorkflowStats, compute_workflow_stats
 from .htcondor_poll import (
     query_queue,
     query_history,
@@ -741,9 +742,10 @@ def run_monitor(
         if pool is not None:
             console.print(_make_pool_panel(pool))
         console.print(_make_events_panel(snap, n=events_n))
-        _print_final_summary(console, snap, condor_jobs=condor_jobs, submit_dir=info.submit_dir)
+        wf_stats = compute_workflow_stats(snap, condor_history=history, pool_status=pool)
+        _print_final_summary(console, snap, condor_jobs=condor_jobs, submit_dir=info.submit_dir, stats=wf_stats)
         if logger is not None:
-            logger.close(snap)
+            logger.close(snap, condor_history=history, pool_status=pool)
         return
 
     with Live(
@@ -781,9 +783,137 @@ def run_monitor(
             pass
 
     # After live session ends, print a brief final summary
-    _print_final_summary(console, snap, condor_jobs=condor_jobs, submit_dir=info.submit_dir)
+    wf_stats = compute_workflow_stats(snap, condor_history=history, pool_status=pool)
+    _print_final_summary(console, snap, condor_jobs=condor_jobs, submit_dir=info.submit_dir, stats=wf_stats)
     if logger is not None:
-        logger.close(snap)
+        logger.close(snap, condor_history=history, pool_status=pool)
+
+
+def _format_eff_range(lo: Optional[float], hi: Optional[float], mean: Optional[float]) -> str:
+    """Format an efficiency range like '81% (42%–98%)'."""
+    if mean is None:
+        return ""
+    mean_s = f"{mean * 100:.0f}%"
+    if lo is not None and hi is not None and lo != hi:
+        return f"{mean_s} ({lo * 100:.0f}%–{hi * 100:.0f}%)"
+    return mean_s
+
+
+def _print_stats_block(console: Console, stats: WorkflowStats) -> None:
+    """Print a human-readable statistics block."""
+    table = Table(
+        box=box.SIMPLE_HEAVY,
+        show_header=False,
+        padding=(0, 2),
+        expand=False,
+        title="[bold]Workflow Statistics[/bold]",
+        title_style="dim",
+    )
+    table.add_column("Label", style="dim", no_wrap=True)
+    table.add_column("Value", style="white", no_wrap=True)
+
+    # Job counts
+    parts = []
+    if stats.compute_jobs:
+        parts.append(f"{stats.compute_jobs} compute")
+    if stats.infra_jobs:
+        parts.append(f"{stats.infra_jobs} infra")
+    job_line = ", ".join(parts) + f"  ({stats.total_jobs} total"
+    if stats.failed:
+        job_line += f", {stats.failed} failed"
+    if stats.held:
+        job_line += f", {stats.held} held"
+    job_line += ")"
+    table.add_row("Jobs", job_line)
+
+    # Wall time
+    if stats.wall_time is not None:
+        table.add_row("Wall time", fmt_duration(stats.wall_time))
+
+    # Compute time + parallelism
+    if stats.total_compute_time is not None:
+        ct = fmt_duration(stats.total_compute_time)
+        if stats.parallelism is not None and stats.parallelism > 1.01:
+            ct += f"  ({stats.parallelism:.1f}x parallelism)"
+        table.add_row("Compute time", ct)
+
+    # Duration range
+    if stats.dur_min is not None and stats.dur_max is not None:
+        dur_line = f"min: {fmt_duration(stats.dur_min)}  max: {fmt_duration(stats.dur_max)}"
+        if stats.dur_mean is not None:
+            dur_line += f"  mean: {fmt_duration(stats.dur_mean)}"
+        if stats.dur_median is not None:
+            dur_line += f"  median: {fmt_duration(stats.dur_median)}"
+        table.add_row("Duration", dur_line)
+
+    # Longest / shortest job
+    if stats.longest_job_name and stats.dur_max is not None:
+        table.add_row("Longest job", f"{stats.longest_job_name} ({fmt_duration(stats.dur_max)})")
+    if (stats.shortest_job_name and stats.dur_min is not None
+            and stats.shortest_job_name != stats.longest_job_name):
+        table.add_row("Shortest job", f"{stats.shortest_job_name} ({fmt_duration(stats.dur_min)})")
+
+    # Memory
+    if stats.peak_maxrss_kb is not None:
+        mem_line = f"peak: {fmt_memory(stats.peak_maxrss_kb)}"
+        if stats.peak_maxrss_job:
+            mem_line += f" ({stats.peak_maxrss_job})"
+        if stats.mean_maxrss_kb is not None:
+            mem_line += f"  avg: {fmt_memory(int(stats.mean_maxrss_kb))}"
+        table.add_row("Memory", mem_line)
+
+    # CPU efficiency
+    eff_line = _format_eff_range(stats.cpu_eff_min, stats.cpu_eff_max, stats.cpu_eff_mean)
+    if eff_line:
+        table.add_row("CPU efficiency", eff_line)
+
+    # Memory efficiency
+    mem_eff_line = _format_eff_range(stats.mem_eff_min, stats.mem_eff_max, stats.mem_eff_mean)
+    if mem_eff_line:
+        table.add_row("Mem efficiency", mem_eff_line)
+
+    # Queue wait
+    if stats.wait_mean is not None:
+        wait_line = f"mean: {fmt_duration(stats.wait_mean)}"
+        if stats.wait_min is not None and stats.wait_max is not None:
+            wait_line += f"  ({fmt_duration(stats.wait_min)}–{fmt_duration(stats.wait_max)})"
+        table.add_row("Queue wait", wait_line)
+
+    # CPU-hours
+    if stats.cpu_seconds is not None:
+        hours = stats.cpu_seconds / 3600
+        if hours >= 1.0:
+            table.add_row("CPU consumed", f"{hours:.2f} hours")
+        else:
+            table.add_row("CPU consumed", f"{stats.cpu_seconds:.1f}s")
+
+    # Transfer
+    if stats.transfer_bytes is not None and stats.transfer_bytes > 0:
+        from .htcondor_poll import format_transfer
+        table.add_row("Data transfer", format_transfer(
+            {"BytesSent": stats.transfer_bytes, "BytesRecvd": 0}
+        ))
+
+    # Retries
+    if stats.retry_count is not None and stats.retry_count > 0:
+        table.add_row("Retries", str(stats.retry_count))
+
+    # Hosts
+    if stats.hosts:
+        table.add_row("Hosts", ", ".join(stats.hosts[:5]))
+
+    # Pool
+    pool_parts = []
+    if stats.pool_machines is not None:
+        pool_parts.append(f"{stats.pool_machines} machines")
+    if stats.pool_total_cpus is not None:
+        pool_parts.append(f"{stats.pool_total_cpus} CPUs")
+    if stats.pool_total_gpus is not None:
+        pool_parts.append(f"{stats.pool_total_gpus} GPUs")
+    if pool_parts:
+        table.add_row("Pool", ", ".join(pool_parts))
+
+    console.print(table)
 
 
 def _print_final_summary(
@@ -791,6 +921,7 @@ def _print_final_summary(
     snap: WorkflowSnapshot,
     condor_jobs: Optional[List] = None,
     submit_dir: Optional[Path] = None,
+    stats: Optional[WorkflowStats] = None,
 ) -> None:
     console.print()
     if snap.succeeded:
@@ -853,4 +984,10 @@ def _print_final_summary(
                 console.print(f"  [magenta]⊘ {diag.job_name}[/magenta]: {diag.summary}")
                 for sug in diag.suggestions[:2]:
                     console.print(f"    [yellow]→ {sug}[/yellow]")
+
+    # Print statistics block if available
+    if stats is not None:
+        console.print()
+        _print_stats_block(console, stats)
+
     console.print()

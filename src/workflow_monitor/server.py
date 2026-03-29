@@ -201,7 +201,7 @@ def run_server(
         print(f"Server error: {exc}", file=sys.stderr)
     finally:
         if snap is not None:
-            logger.close(snap)
+            logger.close(snap, condor_history=history_cache, pool_status=pool_cache)
         else:
             logger.close()
         _cleanup_pid(pid_file)

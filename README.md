@@ -39,6 +39,7 @@ A real-time terminal dashboard for monitoring running [Pegasus WMS](https://pega
 - **Zero workflow modification** — reads only from files Pegasus and HTCondor already produce
 - **Credential-aware** — supports IDTOKEN, X.509/GSI certificates, and password file auth for remote pools; local pools need nothing
 - **Flexible target** — point at a workflow base directory, a specific run directory, or a `braindump.yml` file directly
+- **Workflow statistics** — prints an analytics summary on completion covering job durations, CPU/memory efficiency, queue wait, transfer I/O, parallelism, and host distribution; also emitted as a `workflow_stats` JSONL event for post-hoc analysis
 - **Non-interactive mode** — `--once` for scripting, CI, or quick status checks
 - **Event logging** — `--log` captures every workflow and job state transition to a JSONL file for replay or post-hoc analysis
 - **Replay mode** — `--replay` reads a JSONL event log and visually replays the workflow in the TUI at configurable speed (`--speed`)
@@ -395,6 +396,7 @@ When `--log` or `--serve` is active, the monitor writes a JSONL (JSON Lines) fil
 | `htcondor_poll` | HTCondor queue contents or attributes change | `jobs` (list of ClassAd dicts including `HoldReason`, `JobStatus`, resource requests, transfer bytes) |
 | `htcondor_history` | New completed jobs appear in condor_history | `jobs` (list of ClassAd dicts with `RemoteWallClockTime`, `RemoteUserCpu`, `DiskUsage`, `LastRemoteHost`, etc.) |
 | `pool_status` | Pool slot/CPU/memory counts change | `pool` (dict with `total_slots`, `idle_slots`, `claimed_slots`, `total_cpus`, `idle_cpus`, `total_memory_mb`, `idle_memory_mb`, `total_gpus`, `idle_gpus`, `machines`, `os_arch`) |
+| `workflow_stats` | Just before workflow_end | `stats` (dict with job counts, duration distribution, CPU/memory efficiency, queue wait, transfer I/O, parallelism, host distribution, pool summary) |
 | `workflow_end` | Monitor exits (last line) | `wf_state`, `wf_status`, `wf_end`, `total_jobs`, `done`, `failed`, `elapsed` |
 
 Every event includes `event_type`, `timestamp` (Unix float), and `wf_uuid`.
@@ -474,7 +476,8 @@ In client/server mode, the data flows through a JSONL log file:
 | `htcondor_poll.py` | Queries the live HTCondor queue (`condor_q`), job history (`condor_history`), and pool status (`condor_status`). Tries Python bindings first; falls back to subprocess. Applies credential setup before queries. Provides resource request formatting, efficiency calculations, transfer I/O metrics, and pool resource aggregation. |
 | `display.py` | Builds and drives the Rich terminal dashboard. Renders inside `rich.live.Live` with configurable refresh. Supports mode badges. |
 | `diagnostics.py` | Pattern-matches held and failed jobs against HTCondor hold reasons, exit codes, and kickstart stderr for actionable suggestions. |
-| `event_log.py` | JSONL event logger with resume support. Tracks high-water timestamps to avoid duplicates. Fingerprint-based HTCondor poll dedup. |
+| `stats.py` | Computes end-of-workflow analytics from stampede.db, condor_history, and pool status. Produces a `WorkflowStats` dataclass for JSONL serialization and console rendering. |
+| `event_log.py` | JSONL event logger with resume support. Tracks high-water timestamps to avoid duplicates. Fingerprint-based HTCondor poll dedup. Emits `workflow_stats` before `workflow_end`. |
 | `replay.py` | Loads a JSONL event log and replays it through the TUI at configurable speed. Handles multi-session logs. |
 | `server.py` | Headless daemon for client/server mode. Daemonizes via double-fork. Writes PID file for lifecycle management. |
 | `remote.py` | SSH client engine. Incremental byte-offset fetching. Reconstructs workflow state from events. Supports `--once`. |
