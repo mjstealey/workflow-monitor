@@ -3,30 +3,41 @@
 A real-time terminal dashboard for monitoring running [Pegasus WMS](https://pegasus.isi.edu) workflows. Reads directly from the data sources that Pegasus and HTCondor produce — no source code modifications required, no additional daemons to run.
 
 ```
-╭──────────────────────────────────────────────────────────────────────────────╮
-│ Pegasus Workflow Monitor   LIVE                           Refreshed 12:42:07 │
-│ workflow: earthquake  uuid: 60843726…  user: stealey           pegasus 5.1.2 │
-╰──────────────────────────────────────────────────────────────────────────────╯
-╭────────────────────────────── Workflow Status ───────────────────────────────╮
-│ ● RUNNING  Elapsed: 1m42s  60.0%  21/35 done  Done:21 Run:3 Queued:0 Wait:11 │
-│ [████████████████████████░░░░░░░░░░░░░░░░]                                   │
-╰──────────────────────────────────────────────────────────────────────────────╯
-╭───────────────────────────────────────── Compute Jobs ─────────────────────────────────────────╮
-│  Job                  Type    State   Exit  Duration  Args         Mem     Req       Live      │
-│  fetch_earthquake_…  compute  SUCCESS  0       12s  --region …  109.2M  1c/2.0G  slot1 cpu:92% │
-│  detect_seismic_an…  compute  SUCCESS  0       15s  --input c…  167.1M  1c/2.0G  slot2 cpu:78% │
-│  cluster_seismic_z…  compute  RUNNING  -       18s  --input c…       -  2c/4.0G  Running slot1 │
-│  assess_seismic_ha…  compute  RUNNING  -       12s  --input c…       -  1c/2.0G  Running slot2 │
-│  visualize_earthqu…  compute  SUCCESS  0       10s  --input c…  320.6M  1c/4.0G  slot1 cpu:95% │
-╰───────────────────────────────────────────────────────────────────────────────────────────────╯
-╭─────────────────────────────── Recent Events ────────────────────────────────╮
-│  Job                     State    Start       End        Duration       Mem  │
-│  cluster_seismic_zo…    RUNNING   12:42:07    -              18s          -  │
-│  assess_seismic_haz…    RUNNING   12:42:07    -              12s          -  │
-│  detect_seismic_ano…    SUCCESS   12:42:07    12:42:22       15s     167.1M  │
-│  analyze_seismic_ga…    SUCCESS   12:42:07    12:42:22       15s     167.2M  │
-│  ...                                                                        │
-╰──────────────────────────────────────────────────────────────────────────────╯
+╭───────────────────────────────────────────────────────────────────────────────────────────╮
+│  Pegasus Workflow Monitor   LIVE                                    Refreshed 14:23:47    │
+│  workflow: earthquake  uuid: f886d43d…  user: ubuntu                    pegasus 5.1.2     │
+╰───────────────────────────────────────────────────────────────────────────────────────────╯
+╭──────────────────────────────── Workflow Status ──────────────────────────────────────────╮
+│  ● RUNNING   Elapsed: 2m48s   54.2%   13/24 done   Done:13  Run:3  Queued:1  Wait:7       │
+│  [██████████████████████████░░░░░░░░░░░░░░░░░░░░░░]                                       │
+╰───────────────────────────────────────────────────────────────────────────────────────────╯
+╭──────────────────────────────── Compute Jobs ─────────────────────────────────────────────╮
+│  Job                        Type    State    Exit  Duration  Args              Mem    Req │
+│  fetch_earthquake_data      compute SUCCESS   0        8s   --region cali…  69.1M  1c/2G  │
+│  detect_seismic_anomalies   compute SUCCESS   0       11s   --input cali…  101.7M  1c/2G  │
+│  analyze_seismic_gaps       compute SUCCESS   0       10s   --input cali…  101.6M  1c/2G  │
+│  analyze_seismic_patterns   compute SUCCESS   0        9s   --input cali…  101.4M  1c/2G  │
+│  cluster_seismic_zones      compute RUNNING   -       18s   --input cali…       -  1c/2G  │
+│  predict_aftershocks        compute SUCCESS   0       10s   --input cali…  101.1M  1c/4G  │
+│  assess_seismic_hazard      compute RUNNING   -       42s   --input cali…       -  1c/2G  │
+│  visualize_earthquakes      compute SUCCESS   0       11s   --input cali…  324.0M  1c/2G  │
+│  visualize_seismic_gaps     compute RUNNING   -        5s   --input cali…       -  1c/2G  │
+│  visualize_aftershock_…     compute QUEUED    -        -    --input cali…       -  1c/2G  │
+│  visualize_seismic_hazard   compute   -       -        -    --input cali…       -  1c/2G  │
+╰───────────────────────────────────────────────────────────────────────────────────────────╯
+╭──────────────────────────────── Pool Resources ───────────────────────────────────────────╮
+│  Machines: 3   Slots: 3/20 claimed (17 idle)   CPUs: 3/20 (17 idle)                       │
+│  Memory: 6.0G/39.0G (33.0G free)   Platform: LINUX/X86_64                                 │
+╰───────────────────────────────────────────────────────────────────────────────────────────╯
+╭──────────────────────────────── Recent Events ────────────────────────────────────────────╮
+│  Job                        State    Start      End        Duration    Mem                │
+│  visualize_seismic_gaps     RUNNING  14:23:42   -               5s      -                 │
+│  cluster_seismic_zones      RUNNING  14:21:29   -              18s      -                 │
+│  assess_seismic_hazard      RUNNING  14:21:05   -              42s      -                 │
+│  visualize_earthquakes      SUCCESS  14:21:29   14:21:40       11s  324.0M                │
+│  predict_aftershocks        SUCCESS  14:21:29   14:21:39       10s  101.1M                │
+│  analyze_seismic_patterns   SUCCESS  14:20:37   14:20:46        9s  101.4M                │
+╰───────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
 ## Features
@@ -36,6 +47,7 @@ A real-time terminal dashboard for monitoring running [Pegasus WMS](https://pega
 - **Post-completion metrics** — queries `condor_history` for CPU/memory efficiency, disk usage, and remote host after jobs finish
 - **Pool resources** — queries `condor_status` for pool-wide slot, CPU, memory, and GPU availability; helps diagnose why jobs are idle
 - **Diagnostics** — pattern-matches HTCondor hold reasons and kickstart stderr to surface actionable suggestions for held and failed jobs
+- **Why-idle diagnostic** — one-shot `--why-idle` command explains why workflow jobs are stuck idle by checking pool capacity vs. job requirements, user fair-share priority, and negotiation cycle timing
 - **Zero workflow modification** — reads only from files Pegasus and HTCondor already produce
 - **Credential-aware** — supports IDTOKEN, X.509/GSI certificates, and password file auth for remote pools; local pools need nothing
 - **Flexible target** — point at a workflow base directory, a specific run directory, or a `braindump.yml` file directly
@@ -111,6 +123,9 @@ uv run workflow-monitor \
   --ssh-config ~/.ssh/fabric-ssh-config \
   --ssh-identity ~/.ssh/my-sliver-key
 
+# Diagnose why jobs are stuck idle (one-shot, prints and exits)
+uv run workflow-monitor --why-idle /path/to/diamond-workflow
+
 # Stop a running server daemon
 uv run workflow-monitor --stop-server /path/to/diamond-workflow
 ```
@@ -119,13 +134,14 @@ uv run workflow-monitor --stop-server /path/to/diamond-workflow
 
 ```
 usage: workflow-monitor [-h] [--version] [--interval SECONDS] [--all-jobs]
-                        [--events N] [--once] [--log [PATH]] [--replay PATH]
-                        [--speed MULTIPLIER] [--serve] [--serve-foreground]
-                        [--stop-server [PID_FILE]] [--remote USER@HOST:/PATH]
-                        [--sync-interval SECONDS] [--ssh-config PATH]
-                        [--ssh-identity PATH] [--schedd NAME]
-                        [--collector HOST[:PORT]] [--token PATH] [--cert PATH]
-                        [--key PATH] [--password-file PATH]
+                        [--events N] [--once] [--why-idle] [--log [PATH]]
+                        [--replay PATH] [--speed MULTIPLIER] [--serve]
+                        [--serve-foreground] [--stop-server [PID_FILE]]
+                        [--remote USER@HOST:/PATH] [--sync-interval SECONDS]
+                        [--ssh-config PATH] [--ssh-identity PATH]
+                        [--schedd NAME] [--collector HOST[:PORT]]
+                        [--token PATH] [--cert PATH] [--key PATH]
+                        [--password-file PATH]
                         [TARGET]
 ```
 
@@ -148,6 +164,7 @@ The `TARGET` is resolved in this order:
 | `--all-jobs`, `-a` | off | Show all job types (stage-in/out, cleanup, etc.) in the job table, not just compute jobs. |
 | `--events N`, `-e` | `15` | Number of recent job-state events to show in the events panel. |
 | `--once` | off | Print the current status once and exit. Useful for scripting. Works with all modes including `--remote`. |
+| `--why-idle` | off | One-shot diagnostic: explain why workflow jobs are idle, then exit. Checks pool capacity, user priority, and negotiation cycles. |
 | `--log [PATH]` | off | Log all events to a JSONL file. If `PATH` is omitted, writes to `{submit_dir}/workflow-events.jsonl`. |
 | `--replay PATH` | — | Replay a JSONL event log in the TUI dashboard (no live workflow needed). |
 | `--speed MULTIPLIER` | `1.0` | Replay speed multiplier (e.g. `4` = 4x speed, `0.5` = half speed). Only used with `--replay`. |
@@ -303,6 +320,28 @@ uv run workflow-monitor --replay example-logs/workflow-events.jsonl --all-jobs
 ```
 
 The header displays a `REPLAY` badge and the current speed multiplier. Events are grouped by timestamp and paced according to the original timing, scaled by `--speed`. Press `Ctrl+C` to exit early.
+
+### Why-idle diagnostic (`--why-idle`)
+
+A focused, one-shot command that answers "why are my jobs stuck idle?" without adding to the continuous monitoring loop. It gathers data from multiple sources, analyzes it, and prints a human-readable diagnosis.
+
+```bash
+# Basic usage — prints diagnosis and exits
+uv run workflow-monitor --why-idle /path/to/workflow
+
+# With remote pool credentials
+uv run workflow-monitor --why-idle --collector cm.example.org --token /path/to/token /path/to/workflow
+```
+
+The diagnostic checks:
+
+1. **Workflow state** — identifies which jobs are QUEUED (in HTCondor, waiting for a slot) vs. UNSUBMITTED (waiting on DAG dependencies)
+2. **Pool capacity** — queries `condor_status` to compare available CPUs, memory, and GPUs against job resource requests
+3. **Resource mismatches** — flags specific jobs whose requirements exceed available pool capacity (e.g., "needs 8GB RAM but only 4GB idle")
+4. **User priority** — runs `condor_userprio` to show your fair-share priority relative to other users on shared pools
+5. **Negotiation cycles** — queries the negotiator daemon for cycle duration and match count to detect matchmaking bottlenecks
+
+Output includes tables for idle jobs, pool resources, and user priority, followed by numbered findings and actionable suggestions. Data sources that are unavailable (e.g., `condor_userprio` on a single-user pool) are silently skipped — the diagnostic works with whatever is available.
 
 ### Client/Server options
 
@@ -480,6 +519,7 @@ In client/server mode, the data flows through a JSONL log file:
 | `event_log.py` | JSONL event logger with resume support. Tracks high-water timestamps to avoid duplicates. Fingerprint-based HTCondor poll dedup. Emits `workflow_stats` before `workflow_end`. |
 | `replay.py` | Loads a JSONL event log and replays it through the TUI at configurable speed. Handles multi-session logs. |
 | `server.py` | Headless daemon for client/server mode. Daemonizes via double-fork. Writes PID file for lifecycle management. |
+| `why_idle.py` | One-shot idle job diagnostic. Queries pool capacity, user priority, and negotiator timing. Produces human-readable analysis with Rich output. |
 | `remote.py` | SSH client engine. Incremental byte-offset fetching. Reconstructs workflow state from events. Supports `--once`. |
 
 ![terminal dashboard](./images/terminal-dashboard.png)
@@ -521,6 +561,9 @@ The monitor queries `condor_status` for pool-wide slot information. This require
 
 **Live column shows no efficiency data for completed jobs**
 The monitor queries `condor_history` for post-completion metrics (CPU efficiency, memory efficiency, disk usage). If `condor_history` is not available on your submit node, these fields are silently omitted — the monitor continues to work with data from the stampede database. This is normal on systems where history is kept on a central manager rather than the local schedd.
+
+**`--why-idle` shows "Could not query pool status" or "Could not query user priorities"**
+These are informational, not errors. The diagnostic works with whatever data sources are available. If `condor_status` or `condor_userprio` are not on your PATH, the corresponding checks are skipped and the remaining findings are still shown. Ensure HTCondor tools are on your PATH (e.g., `. ~/condor/condor.sh`) for the full diagnostic.
 
 **Dashboard appears garbled or cut off**
 The Rich layout adapts to your terminal size. Widen the terminal window for best results. A minimum width of ~100 columns is recommended.

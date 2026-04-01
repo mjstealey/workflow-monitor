@@ -71,6 +71,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print current status once and exit (non-interactive)",
     )
     p.add_argument(
+        "--why-idle",
+        action="store_true",
+        default=False,
+        help="One-shot diagnostic: explain why workflow jobs are idle, then exit",
+    )
+    p.add_argument(
         "--log",
         nargs="?",
         const="auto",
@@ -284,6 +290,40 @@ def main(argv: list | None = None) -> int:
         condor_kwargs["key_path"] = args.key
     if getattr(args, "password_file", None):
         condor_kwargs["password_file"] = args.password_file
+
+    # ── Why-idle diagnostic (one-shot, exits immediately) ───────────────────
+    if args.why_idle:
+        from .why_idle import run_why_idle
+
+        condor_kwargs_idle: dict = {}
+        if args.schedd:
+            condor_kwargs_idle["schedd_name"] = args.schedd
+        if args.collector:
+            condor_kwargs_idle["collector_host"] = args.collector
+        if args.token:
+            condor_kwargs_idle["token_path"] = args.token
+        if args.cert:
+            condor_kwargs_idle["cert_path"] = args.cert
+        if args.key:
+            condor_kwargs_idle["key_path"] = args.key
+        if getattr(args, "password_file", None):
+            condor_kwargs_idle["password_file"] = args.password_file
+
+        submit_dir_esc = str(info.submit_dir).replace("\\", "\\\\").replace('"', '\\"')
+        condor_constraint_idle = (
+            f'Cmd =!= UNDEFINED'
+            f' && substr(Cmd, 0, {len(str(info.submit_dir))}) == "{submit_dir_esc}"'
+        )
+
+        with StampedeDB(db_path, wf_uuid=info.wf_uuid) as db:
+            snap = db.snapshot()
+
+        return run_why_idle(
+            info=info,
+            snapshot=snap,
+            condor_constraint=condor_constraint_idle,
+            condor_kwargs=condor_kwargs_idle,
+        )
 
     # ── Resolve log path ─────────────────────────────────────────────────────
     log_path = None
