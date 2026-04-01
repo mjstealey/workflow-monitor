@@ -11,14 +11,14 @@ A real-time terminal dashboard for monitoring running [Pegasus WMS](https://pega
 │ ● RUNNING  Elapsed: 1m42s  60.0%  21/35 done  Done:21 Run:3 Queued:0 Wait:11 │
 │ [████████████████████████░░░░░░░░░░░░░░░░]                                   │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-╭──────────────────────────────── Compute Jobs ────────────────────────────────╮
-│  Job                  Type    State   Exit  Duration  Args           Mem     │
-│  fetch_earthquake_…  compute  SUCCESS  0       12s  --region …    109.2M     │
-│  detect_seismic_an…  compute  SUCCESS  0       15s  --input c…    167.1M     │
-│  cluster_seismic_z…  compute  RUNNING  -       18s  --input c…         -     │
-│  assess_seismic_ha…  compute  RUNNING  -       12s  --input c…         -     │
-│  visualize_earthqu…  compute  SUCCESS  0       10s  --input c…    320.6M     │
-╰──────────────────────────────────────────────────────────────────────────────╯
+╭───────────────────────────────────────── Compute Jobs ─────────────────────────────────────────╮
+│  Job                  Type    State   Exit  Duration  Args         Mem     Req       Live      │
+│  fetch_earthquake_…  compute  SUCCESS  0       12s  --region …  109.2M  1c/2.0G  slot1 cpu:92% │
+│  detect_seismic_an…  compute  SUCCESS  0       15s  --input c…  167.1M  1c/2.0G  slot2 cpu:78% │
+│  cluster_seismic_z…  compute  RUNNING  -       18s  --input c…       -  2c/4.0G  Running slot1 │
+│  assess_seismic_ha…  compute  RUNNING  -       12s  --input c…       -  1c/2.0G  Running slot2 │
+│  visualize_earthqu…  compute  SUCCESS  0       10s  --input c…  320.6M  1c/4.0G  slot1 cpu:95% │
+╰───────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─────────────────────────────── Recent Events ────────────────────────────────╮
 │  Job                     State    Start       End        Duration       Mem  │
 │  cluster_seismic_zo…    RUNNING   12:42:07    -              18s          -  │
@@ -32,11 +32,14 @@ A real-time terminal dashboard for monitoring running [Pegasus WMS](https://pega
 ## Features
 
 - **Near real-time** — polls the Pegasus stampede database every 2 seconds (configurable)
-- **Live HTCondor queue** — overlays live `condor_q` status on running jobs
+- **Live HTCondor queue** — overlays live `condor_q` status on running jobs with resource requests, queue wait time, retry count, and transfer I/O
+- **Post-completion metrics** — queries `condor_history` for CPU/memory efficiency, disk usage, and remote host after jobs finish
+- **Pool resources** — queries `condor_status` for pool-wide slot, CPU, memory, and GPU availability; helps diagnose why jobs are idle
 - **Diagnostics** — pattern-matches HTCondor hold reasons and kickstart stderr to surface actionable suggestions for held and failed jobs
 - **Zero workflow modification** — reads only from files Pegasus and HTCondor already produce
 - **Credential-aware** — supports IDTOKEN, X.509/GSI certificates, and password file auth for remote pools; local pools need nothing
 - **Flexible target** — point at a workflow base directory, a specific run directory, or a `braindump.yml` file directly
+- **Workflow statistics** — prints an analytics summary on completion covering job durations, CPU/memory efficiency, queue wait, transfer I/O, parallelism, and host distribution; also emitted as a `workflow_stats` JSONL event for post-hoc analysis
 - **Non-interactive mode** — `--once` for scripting, CI, or quick status checks
 - **Event logging** — `--log` captures every workflow and job state transition to a JSONL file for replay or post-hoc analysis
 - **Replay mode** — `--replay` reads a JSONL event log and visually replays the workflow in the TUI at configurable speed (`--speed`)
@@ -346,10 +349,25 @@ A table of individual jobs with:
 | **Duration** | Wall time from `EXECUTE` to `JOB_TERMINATED`; updates live for running jobs |
 | **Args** | Task arguments from the Pegasus workflow definition (truncated to 40 chars); compute jobs only |
 | **Mem** | Peak resident memory (maxrss) from the kickstart invocation record; populated after job completion |
-| **Live** | Real-time HTCondor queue status (`Idle`, `Running`, `Held`, etc.) |
+| **Req** | HTCondor resource requests — compact format like `2c/4.0G/1gpu` (CPUs/memory/GPUs) |
+| **Live** | For running jobs: HTCondor queue status, execute host, queue wait time, retry count, I/O transfer. For completed jobs: execute host, CPU efficiency, memory efficiency, disk usage, transfer I/O |
 
 ### Auxiliary Jobs
 A compact summary of non-compute jobs (stage-in/out, directory creation, cleanup, registration) grouped by type and state. Hidden when no auxiliary jobs have been seen yet.
+
+### Pool Resources (conditional)
+Appears when `condor_status` data is available. Shows a compact summary of the HTCondor pool:
+
+| Row | Description |
+|-----|-------------|
+| **Machines** | Number of unique machines in the pool |
+| **Slots** | Claimed/total slots with idle count |
+| **CPUs** | Used/total CPUs with idle count |
+| **Memory** | Used/total memory (GB) with free amount |
+| **GPUs** | Used/total GPUs (only shown when GPUs exist in the pool) |
+| **Platform** | OS and architecture (e.g., `LINUX/X86_64`) |
+
+This panel helps diagnose idle jobs — if all slots are claimed, jobs will wait until resources free up. If the pool has available capacity but jobs are still idle, the issue is likely a requirements mismatch or negotiator priority.
 
 ### Recent Events
 A per-job activity summary showing the most recently active jobs, sorted by completion time (newest first). The number of rows is controlled by `--events`.
@@ -375,7 +393,10 @@ When `--log` or `--serve` is active, the monitor writes a JSONL (JSON Lines) fil
 | `jobs_init` | First snapshot | `total_jobs`, `jobs` (list of `{job_id, exec_job_id, type_desc, transformation, task_argv}`) |
 | `workflow_state` | Workflow state changes | `state` (`WORKFLOW_STARTED`, `WORKFLOW_TERMINATED`), `status`, `wf_start`/`wf_end` |
 | `job_state` | A job transitions to a new state | `exec_job_id`, `type_desc`, `state`, `job_id`, `exitcode`, `stdout_file`, `stderr_file`, `maxrss` |
-| `htcondor_poll` | HTCondor queue contents or attributes change | `jobs` (list of ClassAd dicts including `HoldReason`, `JobStatus`) |
+| `htcondor_poll` | HTCondor queue contents or attributes change | `jobs` (list of ClassAd dicts including `HoldReason`, `JobStatus`, resource requests, transfer bytes) |
+| `htcondor_history` | New completed jobs appear in condor_history | `jobs` (list of ClassAd dicts with `RemoteWallClockTime`, `RemoteUserCpu`, `DiskUsage`, `LastRemoteHost`, etc.) |
+| `pool_status` | Pool slot/CPU/memory counts change | `pool` (dict with `total_slots`, `idle_slots`, `claimed_slots`, `total_cpus`, `idle_cpus`, `total_memory_mb`, `idle_memory_mb`, `total_gpus`, `idle_gpus`, `machines`, `os_arch`) |
+| `workflow_stats` | Just before workflow_end | `stats` (dict with job counts, duration distribution, CPU/memory efficiency, queue wait, transfer I/O, parallelism, host distribution, pool summary) |
 | `workflow_end` | Monitor exits (last line) | `wf_state`, `wf_status`, `wf_end`, `total_jobs`, `done`, `failed`, `elapsed` |
 
 Every event includes `event_type`, `timestamp` (Unix float), and `wf_uuid`.
@@ -418,7 +439,14 @@ Pegasus workflow run
         │       tables: workflow, workflowstate, job, job_instance, jobstate,
         │               task, invocation, rc_lfn, rc_meta
         │
-        └── condor_q / htcondor    ← live HTCondor queue (Python bindings or subprocess)
+        ├── condor_q / htcondor    ← live HTCondor queue (Python bindings or subprocess)
+        │       resource requests, queue wait, transfer I/O, retry count
+        │
+        ├── condor_history         ← post-completion metrics (throttled, ~10s)
+        │       CPU/memory efficiency, disk usage, remote host, transfer bytes
+        │
+        └── condor_status          ← pool slot/machine profiling (throttled, ~15s)
+                slot capacity, CPU/memory/GPU availability, platform info
 ```
 
 In client/server mode, the data flows through a JSONL log file:
@@ -445,10 +473,11 @@ In client/server mode, the data flows through a JSONL log file:
 |--------|---------|
 | `braindump.py` | Locates and parses `braindump.yml` from any accepted `TARGET` form. Provides paths to all workflow artifacts. |
 | `db.py` | Queries the stampede SQLite database in read-only mode. Handles `database is locked` gracefully during concurrent writes. |
-| `htcondor_poll.py` | Queries the live HTCondor queue. Tries Python bindings first; falls back to `condor_q -json`. Applies credential setup before queries. |
+| `htcondor_poll.py` | Queries the live HTCondor queue (`condor_q`), job history (`condor_history`), and pool status (`condor_status`). Tries Python bindings first; falls back to subprocess. Applies credential setup before queries. Provides resource request formatting, efficiency calculations, transfer I/O metrics, and pool resource aggregation. |
 | `display.py` | Builds and drives the Rich terminal dashboard. Renders inside `rich.live.Live` with configurable refresh. Supports mode badges. |
 | `diagnostics.py` | Pattern-matches held and failed jobs against HTCondor hold reasons, exit codes, and kickstart stderr for actionable suggestions. |
-| `event_log.py` | JSONL event logger with resume support. Tracks high-water timestamps to avoid duplicates. Fingerprint-based HTCondor poll dedup. |
+| `stats.py` | Computes end-of-workflow analytics from stampede.db, condor_history, and pool status. Produces a `WorkflowStats` dataclass for JSONL serialization and console rendering. |
+| `event_log.py` | JSONL event logger with resume support. Tracks high-water timestamps to avoid duplicates. Fingerprint-based HTCondor poll dedup. Emits `workflow_stats` before `workflow_end`. |
 | `replay.py` | Loads a JSONL event log and replays it through the TUI at configurable speed. Handles multi-session logs. |
 | `server.py` | Headless daemon for client/server mode. Daemonizes via double-fork. Writes PID file for lifecycle management. |
 | `remote.py` | SSH client engine. Incremental byte-offset fetching. Reconstructs workflow state from events. Supports `--once`. |
@@ -486,6 +515,12 @@ The `*.stampede.db` file is created by `pegasus-monitord` shortly after `pegasus
 
 **Live (Condor) column is always empty**
 The monitor could not reach the HTCondor schedd. Ensure `condor_q` is on your `PATH` (e.g. `. ~/condor/condor.sh`) and that the schedd is running. For remote pools, supply `--collector` and any required credential flags.
+
+**Pool Resources panel does not appear**
+The monitor queries `condor_status` for pool-wide slot information. This requires access to the HTCondor collector daemon. On submit-only nodes that cannot reach the collector, or when `condor_status` is not installed, the panel is silently omitted. The rest of the dashboard continues to work normally. In SSH/remote mode, the panel appears if the server captured `pool_status` events in the JSONL log.
+
+**Live column shows no efficiency data for completed jobs**
+The monitor queries `condor_history` for post-completion metrics (CPU efficiency, memory efficiency, disk usage). If `condor_history` is not available on your submit node, these fields are silently omitted — the monitor continues to work with data from the stampede database. This is normal on systems where history is kept on a central manager rather than the local schedd.
 
 **Dashboard appears garbled or cut off**
 The Rich layout adapts to your terminal size. Widen the terminal window for best results. A minimum width of ~100 columns is recommended.

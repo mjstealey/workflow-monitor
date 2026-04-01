@@ -11,7 +11,9 @@ from rich.live import Live
 
 from .braindump import WorkflowInfo
 from .db import JobRecord, WorkflowSnapshot
-from .display import build_layout
+from .display import build_layout, _print_final_summary
+from .htcondor_poll import PoolSummary
+from .stats import WorkflowStats, compute_workflow_stats
 
 
 class ReplayEngine:
@@ -358,6 +360,9 @@ class ReplayEngine:
         wf_end: Optional[float] = None
         recent_events: List[Dict] = []
         condor_jobs: Optional[List[Dict]] = None
+        condor_history: Optional[List[Dict]] = None
+        pool_status: Optional[PoolSummary] = None
+        workflow_stats: Optional[WorkflowStats] = None
 
         with Live(
             console=console,
@@ -369,10 +374,16 @@ class ReplayEngine:
                 for i, frame in enumerate(frames):
                     frame_ts = float(frame[0].get("timestamp", time.time()))
 
-                    # Extract condor jobs from htcondor_poll events in this frame
+                    # Extract condor data from events in this frame
                     for ev in frame:
                         if ev.get("event_type") == "htcondor_poll":
                             condor_jobs = ev.get("jobs")
+                        elif ev.get("event_type") == "htcondor_history":
+                            condor_history = ev.get("jobs")
+                        elif ev.get("event_type") == "pool_status":
+                            pool_status = PoolSummary.from_dict(ev.get("pool", {}))
+                        elif ev.get("event_type") == "workflow_stats":
+                            workflow_stats = WorkflowStats.from_dict(ev.get("stats", {}))
 
                     snap, wf_state, wf_status, wf_start, wf_end = (
                         self._reconstruct(
@@ -385,6 +396,8 @@ class ReplayEngine:
                         info, snap, show_all, condor_jobs,
                         self._events_n, frame_ts,
                         replay_info=replay_info,
+                        condor_history=condor_history,
+                        pool_status=pool_status,
                     )
                     live.update(layout)
 
@@ -401,18 +414,7 @@ class ReplayEngine:
             except KeyboardInterrupt:
                 pass
 
-        # Final summary
-        console.print()
-        if snap.succeeded:
-            console.print(
-                f"[bold green]✔ Replay complete — workflow succeeded[/bold green]"
-            )
-        elif snap.failed:
-            console.print(
-                f"[bold red]✖ Replay complete — workflow FAILED[/bold red]"
-            )
-        else:
-            console.print(
-                f"[yellow]◌ Replay stopped[/yellow]  (state: {snap.wf_state})"
-            )
-        console.print()
+        # Final summary — reuse the same stats display as live mode
+        if workflow_stats is None:
+            workflow_stats = compute_workflow_stats(snap)
+        _print_final_summary(console, snap, stats=workflow_stats)

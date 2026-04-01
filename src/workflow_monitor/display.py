@@ -31,7 +31,21 @@ from .db import (
 )
 from .diagnostics import collect_diagnostics
 from .event_log import EventLogger
-from .htcondor_poll import query_queue, format_job_status
+from .stats import WorkflowStats, compute_workflow_stats
+from .htcondor_poll import (
+    query_queue,
+    query_history,
+    query_slots,
+    format_job_status,
+    format_resources,
+    format_transfer,
+    format_efficiency,
+    format_disk_usage,
+    queue_wait_seconds,
+    cpu_efficiency,
+    memory_efficiency,
+    PoolSummary,
+)
 
 
 # ─── Workflow state styling ───────────────────────────────────────────────────
@@ -179,6 +193,7 @@ def _make_job_table(
     snap: WorkflowSnapshot,
     show_all: bool = False,
     condor_jobs: Optional[List] = None,
+    condor_history: Optional[List] = None,
 ) -> Panel:
     # Build a condor lookup by DAGNodeName -> status
     condor_map: dict = {}
@@ -187,6 +202,14 @@ def _make_job_table(
             node = cj.get("DAGNodeName", "")
             if node:
                 condor_map[node] = cj
+
+    # Build a history lookup by DAGNodeName -> ClassAd
+    history_map: dict = {}
+    if condor_history:
+        for hj in condor_history:
+            node = hj.get("DAGNodeName", "")
+            if node:
+                history_map[node] = hj
 
     jobs_to_show = snap.jobs if show_all else snap.compute_jobs()
 
@@ -204,6 +227,7 @@ def _make_job_table(
     table.add_column("Duration", justify="right", no_wrap=True, ratio=1)
     table.add_column("Args", style="dim", ratio=2, no_wrap=True, max_width=40)
     table.add_column("Mem", justify="right", style="dim", no_wrap=True, width=7)
+    table.add_column("Req", style="dim", no_wrap=True, width=12)
     table.add_column("Live", style="dim", ratio=1, no_wrap=True)
 
     for job in jobs_to_show:
@@ -225,11 +249,56 @@ def _make_job_table(
 
         mem_cell = Text(fmt_memory(job.maxrss), style="dim")
 
-        # Condor live info
+        # Condor live info (queue) or history (completed)
         condor_info = condor_map.get(job.exec_job_id, {})
+        hist_info = history_map.get(job.exec_job_id, {})
+        req_cell = Text("", style="dim")
         if condor_info:
-            live = format_job_status(condor_info.get("JobStatus"))
-            live_cell = Text(live, style="cyan")
+            # Job is still in the queue — show live status
+            live_parts = []
+            live_parts.append(format_job_status(condor_info.get("JobStatus")))
+            host = condor_info.get("RemoteHost", "")
+            if host:
+                short_host = host.split(".")[0] if "." in host else host
+                live_parts.append(short_host)
+            restarts = condor_info.get("NumJobStarts")
+            if restarts is not None and int(restarts) > 1:
+                live_parts.append(f"try#{int(restarts)}")
+            wait = queue_wait_seconds(condor_info)
+            if wait is not None and wait > 0:
+                live_parts.append(f"wait:{fmt_duration(wait)}")
+            xfer = format_transfer(condor_info)
+            if xfer:
+                live_parts.append(f"io:{xfer}")
+            live_cell = Text(" ".join(live_parts), style="cyan")
+            req_cell = Text(format_resources(condor_info), style="dim")
+        elif hist_info:
+            # Job completed — show post-completion metrics from history
+            live_parts = []
+            host = hist_info.get("LastRemoteHost", "")
+            if host:
+                short_host = host.split(".")[0] if "." in host else host
+                live_parts.append(short_host)
+            eff = cpu_efficiency(hist_info)
+            if eff is not None:
+                eff_style = (
+                    "green" if eff >= 0.7 else "yellow" if eff >= 0.3 else "red"
+                )
+                live_parts.append(f"cpu:{format_efficiency(eff)}")
+            mem_eff = memory_efficiency(hist_info)
+            if mem_eff is not None:
+                live_parts.append(f"mem:{format_efficiency(mem_eff)}")
+            disk = hist_info.get("DiskUsage")
+            if disk:
+                live_parts.append(f"disk:{format_disk_usage(disk)}")
+            xfer = format_transfer(hist_info)
+            if xfer:
+                live_parts.append(f"io:{xfer}")
+            restarts = hist_info.get("NumJobStarts")
+            if restarts is not None and int(restarts) > 1:
+                live_parts.append(f"try#{int(restarts)}")
+            live_cell = Text(" ".join(live_parts), style="dim green")
+            req_cell = Text(format_resources(hist_info), style="dim")
         else:
             live_cell = Text("", style="dim")
 
@@ -243,13 +312,14 @@ def _make_job_table(
             dur_cell,
             argv_cell,
             mem_cell,
+            req_cell,
             live_cell,
         )
 
     if not jobs_to_show:
         table.add_row(
             Text("(no jobs yet)", style="dim italic"),
-            "", "", "", "", "", "", "",
+            "", "", "", "", "", "", "", "",
         )
 
     title = "[bold]Compute Jobs[/bold]" if not show_all else "[bold]All Jobs[/bold]"
@@ -337,6 +407,69 @@ def _make_infra_summary(snap: WorkflowSnapshot) -> Panel:
         table.add_row("(none)", "", "")
 
     return Panel(table, title="[bold]Auxiliary Jobs[/bold]", padding=(0, 0))
+
+
+# ─── Pool resources panel ────────────────────────────────────────────────
+
+def _make_pool_panel(pool: PoolSummary) -> Panel:
+    table = Table(box=None, show_header=False, padding=(0, 1), expand=True)
+    table.add_column("Label", style="dim", no_wrap=True)
+    table.add_column("Value", style="white", no_wrap=True, justify="right")
+
+    # Machines
+    table.add_row("Machines", str(pool.machines))
+
+    # Slots: claimed/idle/total
+    slot_text = Text()
+    if pool.claimed_slots:
+        slot_text.append(f"{pool.claimed_slots}", style="cyan")
+        slot_text.append("/", style="dim")
+    slot_text.append(f"{pool.total_slots}", style="white")
+    if pool.idle_slots:
+        slot_text.append(f" ({pool.idle_slots} idle)", style="dim green")
+    table.add_row("Slots", slot_text)
+
+    # CPUs
+    cpu_text = Text()
+    used = pool.total_cpus - pool.idle_cpus
+    if used > 0:
+        cpu_text.append(f"{used}", style="cyan")
+        cpu_text.append("/", style="dim")
+    cpu_text.append(f"{pool.total_cpus}", style="white")
+    if pool.idle_cpus > 0:
+        cpu_text.append(f" ({pool.idle_cpus} idle)", style="dim green")
+    table.add_row("CPUs", cpu_text)
+
+    # Memory
+    total_gb = pool.total_memory_mb / 1024
+    idle_gb = pool.idle_memory_mb / 1024
+    mem_text = Text()
+    used_gb = total_gb - idle_gb
+    if used_gb > 0.1:
+        mem_text.append(f"{used_gb:.1f}", style="cyan")
+        mem_text.append("/", style="dim")
+    mem_text.append(f"{total_gb:.1f}G", style="white")
+    if idle_gb > 0.1:
+        mem_text.append(f" ({idle_gb:.1f}G free)", style="dim green")
+    table.add_row("Memory", mem_text)
+
+    # GPUs (only if any exist)
+    if pool.total_gpus > 0:
+        gpu_text = Text()
+        used_gpus = pool.total_gpus - pool.idle_gpus
+        if used_gpus > 0:
+            gpu_text.append(f"{used_gpus}", style="cyan")
+            gpu_text.append("/", style="dim")
+        gpu_text.append(f"{pool.total_gpus}", style="white")
+        if pool.idle_gpus > 0:
+            gpu_text.append(f" ({pool.idle_gpus} idle)", style="dim green")
+        table.add_row("GPUs", gpu_text)
+
+    # OS/Arch
+    if pool.os_arch:
+        table.add_row("Platform", Text(pool.os_arch, style="dim"))
+
+    return Panel(table, title="[bold]Pool Resources[/bold]", padding=(0, 0))
 
 
 # ─── Diagnostics panel ────────────────────────────────────────────────────
@@ -434,6 +567,8 @@ def build_layout(
     replay_info: Optional[dict] = None,
     remote_info: Optional[dict] = None,
     submit_dir: Optional[Path] = None,
+    condor_history: Optional[List] = None,
+    pool_status: Optional[PoolSummary] = None,
 ) -> Layout:
     has_issues = snap.held_count() > 0 or snap.failed_count() > 0
 
@@ -455,17 +590,31 @@ def build_layout(
     parts.append(Layout(name="events", size=events_n + 3))
     layout.split_column(*parts)
 
-    layout["main"].split_row(
-        Layout(name="jobs", ratio=3),
-        Layout(name="infra", ratio=1),
-    )
+    # Build the right-side column: infra summary + optional pool resources
+    if pool_status is not None:
+        right_col = Layout(name="right_col")
+        right_col.split_column(
+            Layout(name="infra", ratio=1),
+            Layout(name="pool", size=pool_status.total_gpus > 0 and 9 or 8),
+        )
+        layout["main"].split_row(
+            Layout(name="jobs", ratio=3),
+            right_col,
+        )
+        right_col["infra"].update(_make_infra_summary(snap))
+        right_col["pool"].update(_make_pool_panel(pool_status))
+    else:
+        layout["main"].split_row(
+            Layout(name="jobs", ratio=3),
+            Layout(name="infra", ratio=1),
+        )
+        layout["infra"].update(_make_infra_summary(snap))
 
     layout["header"].update(_make_header(info, snap, refresh_ts, replay_info=replay_info, remote_info=remote_info))
     layout["status"].update(_make_status_bar(snap))
     if has_issues:
         layout["diagnostics"].update(_make_diagnostics_panel(snap, condor_jobs=condor_jobs, submit_dir=submit_dir))
-    layout["jobs"].update(_make_job_table(snap, show_all=show_all, condor_jobs=condor_jobs))
-    layout["infra"].update(_make_infra_summary(snap))
+    layout["jobs"].update(_make_job_table(snap, show_all=show_all, condor_jobs=condor_jobs, condor_history=condor_history))
     layout["events"].update(_make_events_panel(snap, n=events_n))
 
     return layout
@@ -516,27 +665,87 @@ def run_monitor(
         except Exception:
             return []
 
+    # History cache: accumulates completed job records, refreshed every
+    # few poll cycles to avoid hammering condor_history each second.
+    _history_cache: List = []
+    _history_last_poll: float = 0.0
+    _HISTORY_INTERVAL = max(poll_interval * 3, 10.0)  # at least 10s
+
+    def _poll_history() -> List:
+        nonlocal _history_cache, _history_last_poll
+        now = time.time()
+        if now - _history_last_poll < _HISTORY_INTERVAL:
+            return _history_cache
+        try:
+            result = query_history(constraint=condor_constraint, **ck)
+            if result:
+                # Merge into cache (dedup by ClusterId)
+                seen = {h.get("ClusterId") for h in _history_cache}
+                for h in result:
+                    cid = h.get("ClusterId")
+                    if cid not in seen:
+                        _history_cache.append(h)
+                        seen.add(cid)
+        except Exception:
+            pass
+        _history_last_poll = now
+        return _history_cache
+
+    # Pool status cache: polled less frequently (~15s)
+    _pool_cache: Optional[PoolSummary] = None
+    _pool_last_poll: float = 0.0
+    _POOL_INTERVAL = max(poll_interval * 5, 15.0)
+
+    def _poll_pool() -> Optional[PoolSummary]:
+        nonlocal _pool_cache, _pool_last_poll
+        now = time.time()
+        if now - _pool_last_poll < _POOL_INTERVAL:
+            return _pool_cache
+        try:
+            # Pool query uses collector_host but no per-workflow constraint
+            pool_kwargs = {}
+            if ck.get("collector_host"):
+                pool_kwargs["collector_host"] = ck["collector_host"]
+            if ck.get("token_path"):
+                pool_kwargs["token_path"] = ck["token_path"]
+            if ck.get("cert_path"):
+                pool_kwargs["cert_path"] = ck["cert_path"]
+            if ck.get("key_path"):
+                pool_kwargs["key_path"] = ck["key_path"]
+            if ck.get("password_file"):
+                pool_kwargs["password_file"] = ck["password_file"]
+            _pool_cache = query_slots(**pool_kwargs)
+        except Exception:
+            pass
+        _pool_last_poll = now
+        return _pool_cache
+
     def _refresh() -> tuple:
         snap = db.snapshot()
         condor_jobs = _poll_condor()
+        history = _poll_history()
+        pool = _poll_pool()
         ts = time.time()
         if logger is not None:
-            logger.record(snap, condor_jobs)
-        return snap, condor_jobs, ts
+            logger.record(snap, condor_jobs, history, pool)
+        return snap, condor_jobs, history, pool, ts
 
     if once:
-        snap, condor_jobs, ts = _refresh()
+        snap, condor_jobs, history, pool, ts = _refresh()
         console.print(_make_header(info, snap, ts))
         console.print(_make_status_bar(snap))
         if snap.held_count() > 0 or snap.failed_count() > 0:
             console.print(_make_diagnostics_panel(snap, condor_jobs=condor_jobs, submit_dir=info.submit_dir))
-        console.print(_make_job_table(snap, show_all=show_all, condor_jobs=condor_jobs))
+        console.print(_make_job_table(snap, show_all=show_all, condor_jobs=condor_jobs, condor_history=history))
         if snap.infra_jobs():
             console.print(_make_infra_summary(snap))
+        if pool is not None:
+            console.print(_make_pool_panel(pool))
         console.print(_make_events_panel(snap, n=events_n))
-        _print_final_summary(console, snap, condor_jobs=condor_jobs, submit_dir=info.submit_dir)
+        wf_stats = compute_workflow_stats(snap, condor_history=history, pool_status=pool)
+        _print_final_summary(console, snap, condor_jobs=condor_jobs, submit_dir=info.submit_dir, stats=wf_stats)
         if logger is not None:
-            logger.close(snap)
+            logger.close(snap, condor_history=history, pool_status=pool)
         return
 
     with Live(
@@ -547,20 +756,24 @@ def run_monitor(
     ) as live:
         try:
             while True:
-                snap, condor_jobs, ts = _refresh()
+                snap, condor_jobs, history, pool, ts = _refresh()
                 layout = build_layout(
                     info, snap, show_all, condor_jobs, events_n, ts,
                     submit_dir=info.submit_dir,
+                    condor_history=history,
+                    pool_status=pool,
                 )
                 live.update(layout)
 
                 if snap.is_complete and not snap.is_running:
                     # Give one extra beat for final DB flush from monitord
                     time.sleep(poll_interval)
-                    snap, condor_jobs, ts = _refresh()
+                    snap, condor_jobs, history, pool, ts = _refresh()
                     live.update(
                         build_layout(info, snap, show_all, condor_jobs, events_n, ts,
-                                     submit_dir=info.submit_dir)
+                                     submit_dir=info.submit_dir,
+                                     condor_history=history,
+                                     pool_status=pool)
                     )
                     break
 
@@ -570,9 +783,137 @@ def run_monitor(
             pass
 
     # After live session ends, print a brief final summary
-    _print_final_summary(console, snap, condor_jobs=condor_jobs, submit_dir=info.submit_dir)
+    wf_stats = compute_workflow_stats(snap, condor_history=history, pool_status=pool)
+    _print_final_summary(console, snap, condor_jobs=condor_jobs, submit_dir=info.submit_dir, stats=wf_stats)
     if logger is not None:
-        logger.close(snap)
+        logger.close(snap, condor_history=history, pool_status=pool)
+
+
+def _format_eff_range(lo: Optional[float], hi: Optional[float], mean: Optional[float]) -> str:
+    """Format an efficiency range like '81% (42%–98%)'."""
+    if mean is None:
+        return ""
+    mean_s = f"{mean * 100:.0f}%"
+    if lo is not None and hi is not None and lo != hi:
+        return f"{mean_s} ({lo * 100:.0f}%–{hi * 100:.0f}%)"
+    return mean_s
+
+
+def _print_stats_block(console: Console, stats: WorkflowStats) -> None:
+    """Print a human-readable statistics block."""
+    table = Table(
+        box=box.SIMPLE_HEAVY,
+        show_header=False,
+        padding=(0, 2),
+        expand=False,
+        title="[bold]Workflow Statistics[/bold]",
+        title_style="dim",
+    )
+    table.add_column("Label", style="dim", no_wrap=True)
+    table.add_column("Value", style="white", no_wrap=True)
+
+    # Job counts
+    parts = []
+    if stats.compute_jobs:
+        parts.append(f"{stats.compute_jobs} compute")
+    if stats.infra_jobs:
+        parts.append(f"{stats.infra_jobs} infra")
+    job_line = ", ".join(parts) + f"  ({stats.total_jobs} total"
+    if stats.failed:
+        job_line += f", {stats.failed} failed"
+    if stats.held:
+        job_line += f", {stats.held} held"
+    job_line += ")"
+    table.add_row("Jobs", job_line)
+
+    # Wall time
+    if stats.wall_time is not None:
+        table.add_row("Wall time", fmt_duration(stats.wall_time))
+
+    # Compute time + parallelism
+    if stats.total_compute_time is not None:
+        ct = fmt_duration(stats.total_compute_time)
+        if stats.parallelism is not None and stats.parallelism > 1.01:
+            ct += f"  ({stats.parallelism:.1f}x parallelism)"
+        table.add_row("Compute time", ct)
+
+    # Duration range
+    if stats.dur_min is not None and stats.dur_max is not None:
+        dur_line = f"min: {fmt_duration(stats.dur_min)}  max: {fmt_duration(stats.dur_max)}"
+        if stats.dur_mean is not None:
+            dur_line += f"  mean: {fmt_duration(stats.dur_mean)}"
+        if stats.dur_median is not None:
+            dur_line += f"  median: {fmt_duration(stats.dur_median)}"
+        table.add_row("Duration", dur_line)
+
+    # Longest / shortest job
+    if stats.longest_job_name and stats.dur_max is not None:
+        table.add_row("Longest job", f"{stats.longest_job_name} ({fmt_duration(stats.dur_max)})")
+    if (stats.shortest_job_name and stats.dur_min is not None
+            and stats.shortest_job_name != stats.longest_job_name):
+        table.add_row("Shortest job", f"{stats.shortest_job_name} ({fmt_duration(stats.dur_min)})")
+
+    # Memory
+    if stats.peak_maxrss_kb is not None:
+        mem_line = f"peak: {fmt_memory(stats.peak_maxrss_kb)}"
+        if stats.peak_maxrss_job:
+            mem_line += f" ({stats.peak_maxrss_job})"
+        if stats.mean_maxrss_kb is not None:
+            mem_line += f"  avg: {fmt_memory(int(stats.mean_maxrss_kb))}"
+        table.add_row("Memory", mem_line)
+
+    # CPU efficiency
+    eff_line = _format_eff_range(stats.cpu_eff_min, stats.cpu_eff_max, stats.cpu_eff_mean)
+    if eff_line:
+        table.add_row("CPU efficiency", eff_line)
+
+    # Memory efficiency
+    mem_eff_line = _format_eff_range(stats.mem_eff_min, stats.mem_eff_max, stats.mem_eff_mean)
+    if mem_eff_line:
+        table.add_row("Mem efficiency", mem_eff_line)
+
+    # Queue wait
+    if stats.wait_mean is not None:
+        wait_line = f"mean: {fmt_duration(stats.wait_mean)}"
+        if stats.wait_min is not None and stats.wait_max is not None:
+            wait_line += f"  ({fmt_duration(stats.wait_min)}–{fmt_duration(stats.wait_max)})"
+        table.add_row("Queue wait", wait_line)
+
+    # CPU-hours
+    if stats.cpu_seconds is not None:
+        hours = stats.cpu_seconds / 3600
+        if hours >= 1.0:
+            table.add_row("CPU consumed", f"{hours:.2f} hours")
+        else:
+            table.add_row("CPU consumed", f"{stats.cpu_seconds:.1f}s")
+
+    # Transfer
+    if stats.transfer_bytes is not None and stats.transfer_bytes > 0:
+        from .htcondor_poll import format_transfer
+        table.add_row("Data transfer", format_transfer(
+            {"BytesSent": stats.transfer_bytes, "BytesRecvd": 0}
+        ))
+
+    # Retries
+    if stats.retry_count is not None and stats.retry_count > 0:
+        table.add_row("Retries", str(stats.retry_count))
+
+    # Hosts
+    if stats.hosts:
+        table.add_row("Hosts", ", ".join(stats.hosts[:5]))
+
+    # Pool
+    pool_parts = []
+    if stats.pool_machines is not None:
+        pool_parts.append(f"{stats.pool_machines} machines")
+    if stats.pool_total_cpus is not None:
+        pool_parts.append(f"{stats.pool_total_cpus} CPUs")
+    if stats.pool_total_gpus is not None:
+        pool_parts.append(f"{stats.pool_total_gpus} GPUs")
+    if pool_parts:
+        table.add_row("Pool", ", ".join(pool_parts))
+
+    console.print(table)
 
 
 def _print_final_summary(
@@ -580,6 +921,7 @@ def _print_final_summary(
     snap: WorkflowSnapshot,
     condor_jobs: Optional[List] = None,
     submit_dir: Optional[Path] = None,
+    stats: Optional[WorkflowStats] = None,
 ) -> None:
     console.print()
     if snap.succeeded:
@@ -642,4 +984,10 @@ def _print_final_summary(
                 console.print(f"  [magenta]⊘ {diag.job_name}[/magenta]: {diag.summary}")
                 for sug in diag.suggestions[:2]:
                     console.print(f"    [yellow]→ {sug}[/yellow]")
+
+    # Print statistics block if available
+    if stats is not None:
+        console.print()
+        _print_stats_block(console, stats)
+
     console.print()

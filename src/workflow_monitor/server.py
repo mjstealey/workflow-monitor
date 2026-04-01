@@ -19,7 +19,7 @@ from typing import Optional
 from .braindump import WorkflowInfo
 from .db import StampedeDB, WorkflowSnapshot, fmt_duration
 from .event_log import EventLogger
-from .htcondor_poll import query_queue
+from .htcondor_poll import query_queue, query_history, query_slots, PoolSummary
 
 
 def _daemonize(pid_file: Path) -> None:
@@ -123,20 +123,75 @@ def run_server(
         except Exception:
             return []
 
+    # History cache with throttled polling
+    history_cache: list = []
+    history_last_poll: float = 0.0
+    history_interval = max(poll_interval * 3, 10.0)
+
+    def _poll_history():
+        nonlocal history_cache, history_last_poll
+        now = time.time()
+        if now - history_last_poll < history_interval:
+            return history_cache
+        try:
+            result = query_history(constraint=condor_constraint, **ck)
+            if result:
+                seen = {h.get("ClusterId") for h in history_cache}
+                for h in result:
+                    if h.get("ClusterId") not in seen:
+                        history_cache.append(h)
+                        seen.add(h.get("ClusterId"))
+        except Exception:
+            pass
+        history_last_poll = now
+        return history_cache
+
+    # Pool status with throttled polling
+    pool_cache: Optional[PoolSummary] = None
+    pool_last_poll: float = 0.0
+    pool_interval = max(poll_interval * 5, 15.0)
+
+    def _poll_pool():
+        nonlocal pool_cache, pool_last_poll
+        now = time.time()
+        if now - pool_last_poll < pool_interval:
+            return pool_cache
+        try:
+            pool_kwargs = {}
+            if ck.get("collector_host"):
+                pool_kwargs["collector_host"] = ck["collector_host"]
+            if ck.get("token_path"):
+                pool_kwargs["token_path"] = ck["token_path"]
+            if ck.get("cert_path"):
+                pool_kwargs["cert_path"] = ck["cert_path"]
+            if ck.get("key_path"):
+                pool_kwargs["key_path"] = ck["key_path"]
+            if ck.get("password_file"):
+                pool_kwargs["password_file"] = ck["password_file"]
+            pool_cache = query_slots(**pool_kwargs)
+        except Exception:
+            pass
+        pool_last_poll = now
+        return pool_cache
+
     snap: Optional[WorkflowSnapshot] = None
 
     try:
         while not shutdown:
             snap = db.snapshot()
             condor_jobs = _poll_condor()
-            logger.record(snap, condor_jobs)
+            history = _poll_history()
+            pool = _poll_pool()
+            logger.record(snap, condor_jobs, history, pool)
 
             if snap.is_complete and not snap.is_running:
                 # One more poll for final DB flush
                 time.sleep(poll_interval)
                 snap = db.snapshot()
                 condor_jobs = _poll_condor()
-                logger.record(snap, condor_jobs)
+                history = _poll_history()
+                pool = _poll_pool()
+                logger.record(snap, condor_jobs, history, pool)
                 break
 
             time.sleep(poll_interval)
@@ -146,7 +201,7 @@ def run_server(
         print(f"Server error: {exc}", file=sys.stderr)
     finally:
         if snap is not None:
-            logger.close(snap)
+            logger.close(snap, condor_history=history_cache, pool_status=pool_cache)
         else:
             logger.close()
         _cleanup_pid(pid_file)

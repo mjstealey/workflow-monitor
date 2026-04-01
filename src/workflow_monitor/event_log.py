@@ -8,6 +8,8 @@ from typing import Any, Dict, List, Optional
 
 from .braindump import WorkflowInfo
 from .db import StampedeDB, WorkflowSnapshot
+from .htcondor_poll import PoolSummary
+from .stats import compute_workflow_stats
 
 
 class EventLogger:
@@ -39,6 +41,8 @@ class EventLogger:
         self._high_water_ts: float = 0.0
         self._last_wf_state: Optional[str] = None
         self._last_condor_fingerprint: frozenset[tuple] = frozenset()
+        self._last_history_fingerprint: frozenset[tuple] = frozenset()
+        self._last_pool_fingerprint: Optional[str] = None
         self._jobs_init_emitted: bool = False
         self._resumed: bool = False
 
@@ -94,6 +98,13 @@ class EventLogger:
                         jobs = ev.get("jobs", [])
                         self._last_condor_fingerprint = self._condor_fingerprint(jobs)
 
+                    elif etype == "htcondor_history":
+                        jobs = ev.get("jobs", [])
+                        self._last_history_fingerprint = self._history_fingerprint(jobs)
+
+                    elif etype == "pool_status":
+                        self._last_pool_fingerprint = self._pool_fingerprint(ev.get("pool", {}))
+
                     elif etype == "workflow_end":
                         last_end_offset = offset
 
@@ -144,6 +155,8 @@ class EventLogger:
         self,
         snapshot: WorkflowSnapshot,
         condor_jobs: Optional[List[Dict]] = None,
+        condor_history: Optional[List[Dict]] = None,
+        pool_status: Optional[PoolSummary] = None,
     ) -> None:
         """Record new events from the latest poll cycle."""
         if not self._jobs_init_emitted:
@@ -152,9 +165,25 @@ class EventLogger:
         self._record_workflow_state(snapshot)
         self._record_job_events()
         self._record_condor_poll(condor_jobs)
+        self._record_condor_history(condor_history)
+        self._record_pool_status(pool_status)
 
-    def close(self, snapshot: Optional[WorkflowSnapshot] = None) -> None:
-        """Write a workflow_end event and close the file."""
+    def close(
+        self,
+        snapshot: Optional[WorkflowSnapshot] = None,
+        condor_history: Optional[List[Dict]] = None,
+        pool_status: Optional[PoolSummary] = None,
+    ) -> None:
+        """Emit workflow_stats and workflow_end events, then close the file."""
+        # Emit analytics summary before the end marker
+        if snapshot is not None:
+            wf_stats = compute_workflow_stats(snapshot, condor_history, pool_status)
+            self._emit({
+                "event_type": "workflow_stats",
+                "timestamp": time.time(),
+                "stats": wf_stats.to_dict(),
+            })
+
         end_event: Dict[str, Any] = {
             "event_type": "workflow_end",
             "timestamp": time.time(),
@@ -245,15 +274,18 @@ class EventLogger:
     def _condor_fingerprint(jobs: List[Dict]) -> frozenset:
         """Build a fingerprint that captures job identity AND key attributes.
 
-        This ensures an htcondor_poll event is emitted when a job's status
-        or hold reason changes, not just when the set of job IDs changes.
+        This ensures an htcondor_poll event is emitted when a job's status,
+        hold reason, host assignment, or transfer progress changes.
         """
         parts = []
         for cj in jobs:
             key = cj.get("ClusterId", cj.get("DAGNodeName", ""))
             status = cj.get("JobStatus", "")
             hold = cj.get("HoldReason", "")
-            parts.append((str(key), str(status), hold))
+            host = cj.get("RemoteHost", "")
+            sent = str(cj.get("BytesSent", ""))
+            recvd = str(cj.get("BytesRecvd", ""))
+            parts.append((str(key), str(status), hold, host, sent, recvd))
         return frozenset(parts)
 
     def _record_condor_poll(self, condor_jobs: Optional[List[Dict]]) -> None:
@@ -267,3 +299,48 @@ class EventLogger:
                 "jobs": condor_jobs,
             })
             self._last_condor_fingerprint = fp
+
+    @staticmethod
+    def _history_fingerprint(jobs: List[Dict]) -> frozenset:
+        """Build a fingerprint for history records (keyed by ClusterId)."""
+        parts = []
+        for hj in jobs:
+            key = str(hj.get("ClusterId", ""))
+            parts.append(key)
+        return frozenset(parts)
+
+    def _record_condor_history(self, condor_history: Optional[List[Dict]]) -> None:
+        if not condor_history:
+            return
+        fp = self._history_fingerprint(condor_history)
+        if fp != self._last_history_fingerprint:
+            self._emit({
+                "event_type": "htcondor_history",
+                "timestamp": time.time(),
+                "jobs": condor_history,
+            })
+            self._last_history_fingerprint = fp
+
+    @staticmethod
+    def _pool_fingerprint(pool_dict: Dict) -> str:
+        """Build a fingerprint for pool status based on slot counts."""
+        return (
+            f"{pool_dict.get('total_slots', 0)}:"
+            f"{pool_dict.get('claimed_slots', 0)}:"
+            f"{pool_dict.get('idle_slots', 0)}:"
+            f"{pool_dict.get('total_cpus', 0)}:"
+            f"{pool_dict.get('idle_cpus', 0)}"
+        )
+
+    def _record_pool_status(self, pool: Optional["PoolSummary"]) -> None:
+        if pool is None:
+            return
+        pool_dict = pool.to_dict()
+        fp = self._pool_fingerprint(pool_dict)
+        if fp != self._last_pool_fingerprint:
+            self._emit({
+                "event_type": "pool_status",
+                "timestamp": time.time(),
+                "pool": pool_dict,
+            })
+            self._last_pool_fingerprint = fp
