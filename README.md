@@ -522,8 +522,6 @@ In client/server mode, the data flows through a JSONL log file:
 | `why_idle.py` | One-shot idle job diagnostic. Queries pool capacity, user priority, and negotiator timing. Produces human-readable analysis with Rich output. |
 | `remote.py` | SSH client engine. Incremental byte-offset fetching. Reconstructs workflow state from events. Supports `--once`. |
 
-![terminal dashboard](./images/terminal-dashboard.png)
-
 ## Related Projects
 
 ### [predictable-workflow-failures](https://github.com/pegasusai/predictable-workflow-failures)
