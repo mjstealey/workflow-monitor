@@ -15,6 +15,7 @@ This document is a comprehensive reference for every piece of data the workflow-
 7. [HTCondor Negotiator (condor_status -negotiator)](#7-htcondor-negotiator-condor_status--negotiator--matchmaking-timing)
 8. [Kickstart Output Files](#8-kickstart-output-files-out000--job-level-forensics)
 9. [JSONL Event Log (output)](#9-jsonl-event-log-output--workflow-eventssonl)
+9b. [Diagnostics Sidecar (output)](#9b-diagnostics-sidecar-output--diagnostics-eventsjsonl)
 10. [Derived Statistics](#10-derived-statistics--workflowstats)
 11. [Consumption Modes](#11-consumption-modes)
 
@@ -856,6 +857,95 @@ The `EventLogger` supports stop/restart continuity:
 
 ---
 
+## 9b. Diagnostics Sidecar (output) — diagnostics-events.jsonl
+
+**Output file:** `<submit_dir>/diagnostics-events.jsonl` (or alongside `--log` path if specified)
+**Written by:** `diag_log.py` — `DiagnosticLogger` class, driven by `diagnostics_engine.py` — `DiagnosticsEngine`
+**When written:** Each poll cycle when `--diagnose` is enabled, in any monitoring mode (`--diagnose`, `--diagnose --serve`, `--diagnose --once`)
+**Why it matters:** Stores interpretive diagnostic findings (stall detection, hold/failure remediation, idle-job analysis) **separately** from the canonical `workflow-events.jsonl` replay stream. Keeping diagnostics in a sidecar lets the diagnostic schema evolve independently, allows older clients/servers to opt out cleanly, and means a diagnostics-free run produces zero new files.
+
+### Producer pipeline
+
+```
+poll cycle ──▶ DiagnosticsEngine.tick(snap, condor_jobs, pool, high_water_ts)
+                  │
+                  ├─▶ StallDetector.check()  (state machine, 2-strike)
+                  │       │
+                  │       ├─ stall_detected ──▶ why_idle._analyze() (if queued > 0)
+                  │       │                     └─▶ idle_diagnosis event
+                  │       │
+                  │       └─ stall_resolved ──▶ event
+                  │
+                  └─▶ collect_diagnostics(held, failed)  (per-job dedup)
+                          └─▶ hold_diagnosis / failure_diagnosis events
+```
+
+The engine's `tick()` is wrapped in try/except at every call site (`server.py`, `display.py`); engine errors emit a `diag_error` event but never break the monitoring loop.
+
+### File structure
+
+A single JSONL file framed by `diag_start` ... `diag_end`. Each line is a self-contained event with `event_type`, `timestamp` (unix float), and `wf_uuid`. Events are append-only and never rewritten.
+
+### Event types
+
+| Event | When emitted | Key fields |
+|---|---|---|
+| `diag_start` | `DiagnosticLogger` initialization | `schema_version` (currently `1`), `engine_config` (full `StallDetector` threshold dict — makes the run auditable) |
+| `stall_detected` | Heuristic fires on two consecutive cycles | `stall_type` (`all_held` / `no_transitions` / `progress_plateau` / `idle_too_long`), `details`, `total_jobs`, `done_jobs`, `running_jobs`, `queued_jobs`, `held_jobs`, `failed_jobs`, `seconds_since_progress` |
+| `idle_diagnosis` | Immediately after `stall_detected` if `queued_count() > 0` | `idle_job_count`, `pool_available`, `pool_idle_cpus`, `pool_total_cpus`, `pool_idle_memory_mb`, `pool_total_memory_mb`, `findings` (List[str]), `suggestions` (List[str]), `requirement_mismatches` (List[str]) — sourced from `why_idle._analyze()` |
+| `hold_diagnosis` | A held job is matched against `_HOLD_PATTERNS` (per-job dedup) | `job_name`, `severity` (`"held"`), `summary`, `reason`, `suggestions` |
+| `failure_diagnosis` | A failed job is analyzed via kickstart stderr + exit code (per-job dedup) | `job_name`, `severity` (`"failed"`), `summary`, `reason`, `suggestions` |
+| `stall_resolved` | Done count advances or new state transitions arrive while in `confirmed` state | `stall_type`, `stall_duration_seconds`, `resolution` |
+| `diag_end` | `DiagnosticLogger.close()` | — |
+| `diag_error` | Exception inside `idle_diagnosis` or `held_failed` analysis | `stage`, `error` |
+
+### Stall heuristics (priority order)
+
+| # | Name | Condition | Default threshold |
+|---|---|---|---|
+| 1 | `all_held` | `held > 0` and `held == total - done - failed` | Immediate (no cycle count) |
+| 2 | `no_transitions` | `(queued > 0 or running > 0)` and no progress for N seconds | 60s |
+| 3 | `progress_plateau` | `running > 0` and `done_count` flat for N seconds | 120s |
+| 4 | `idle_too_long` | `queued > 0` and `running == 0` for N seconds | 120s |
+
+### False-positive guards
+
+- **Startup grace:** Skip detection for the first 60s of the engine's lifetime.
+- **Workflow complete:** Skip when `snap.is_complete`.
+- **No jobs submitted:** Skip when `total_jobs == 0` or all jobs are `UNSUBMITTED`.
+- **Two-strike rule:** A heuristic must fire on two consecutive cycles before the state machine transitions `normal → suspected → confirmed` and emits `stall_detected`.
+- **Cooldown:** After emitting a `stall_detected` of a given type, suppress further emissions of the same type for `cooldown_seconds` (default 120s). A new stall *type* resets the cooldown.
+
+### Per-job dedup
+
+Held/failed diagnoses are deduped within an active stall window using a key of `f"{severity}:{job_name}"`. The dedup set is cleared on `stall_resolved`. **Known issue:** a job that is held → released → re-held during the same stall window will not be re-diagnosed.
+
+### Consumers
+
+- **Local TUI** (`run_monitor`): keeps an in-memory `diag_active_alerts` list updated by `engine.tick()`'s return value. When non-empty, `build_layout()` inserts a `_make_stall_alert_panel()` row and adds a `STALL` badge to the header. Cleared on `stall_resolved`.
+- **Remote SSH client** (`remote.py`): `_sync_diagnostics()` and `_load_new_diag_events()` perform best-effort incremental fetches via `tail -c +offset`. Failures are silent (older servers without `--diagnose` simply have no sidecar). Alerts are passed to `build_layout()` exactly as in local mode, including the remote sidecar path in the panel footer.
+- **Replay** (`replay.py`): not currently wired to the sidecar — see open issues in `stall_detection_plan.md`.
+
+### Sample lines
+
+```json
+{"event_type": "diag_start", "timestamp": 1775679323.24, "wf_uuid": "8624add0-...", "schema_version": 1, "engine_config": {"poll_interval": 2.0, "cooldown_seconds": 120.0, "no_transition_seconds": 60.0, "progress_plateau_seconds": 120.0, "idle_threshold_seconds": 120.0, "startup_grace_seconds": 60.0}}
+{"event_type": "stall_detected", "timestamp": 1775679413.21, "stall_type": "no_transitions", "details": "No job state transitions for 33s", "total_jobs": 12, "done_jobs": 5, "running_jobs": 1, "queued_jobs": 0, "held_jobs": 0, "failed_jobs": 0, "seconds_since_progress": 32.8, "wf_uuid": "8624add0-..."}
+{"event_type": "stall_resolved", "timestamp": 1775679439.41, "stall_type": "no_transitions", "stall_duration_seconds": 28.3, "resolution": "Progress resumed", "wf_uuid": "8624add0-..."}
+{"event_type": "diag_end", "timestamp": 1775680041.91, "wf_uuid": "8624add0-..."}
+```
+
+### Relationship to `workflow-events.jsonl`
+
+The sidecar is **strictly additive**. The main event log is never modified, fingerprinted, or deduped against the sidecar. Disabling `--diagnose` results in zero changes to the canonical event stream. This separation means:
+
+- A user can enable/disable `--diagnose` between runs without invalidating archived event logs.
+- The diagnostic schema can be versioned independently (`schema_version` in `diag_start`).
+- Replay of `workflow-events.jsonl` works identically with or without a sidecar.
+- A future tool could re-run the engine over an old `workflow-events.jsonl` to produce a fresh `diagnostics-events.jsonl` without touching the source of truth.
+
+---
+
 ## 10. Derived Statistics — WorkflowStats
 
 **Module:** `stats.py` — `compute_workflow_stats()` → `WorkflowStats` dataclass
@@ -941,6 +1031,7 @@ The `EventLogger` supports stop/restart continuity:
 | **Remote SSH** | `--remote user@host:/path` | JSONL via `ssh tail -c +offset` | Every `--sync-interval` (5s) |
 | **Replay** | `--replay FILE` | JSONL file | Frame-based, `--speed` controlled |
 | **Why-Idle** | `--why-idle` | stampede.db + condor_q (idle only) + condor_status + condor_userprio + condor_status -negotiator | Single poll, prints and exits |
+| **Diagnose (overlay)** | `--diagnose` | Adds: `StallDetector` state machine + on-demand reuse of `why_idle._analyze()` and `collect_diagnostics()` | Same as host mode; engine ticks once per poll cycle |
 
 ### Data Source Availability Matrix
 
@@ -955,6 +1046,7 @@ The `EventLogger` supports stop/restart continuity:
 | condor_status -negotiator | N/A | N/A | N/A | N/A | once |
 | Kickstart .out.000 | on-demand (diagnostics) | N/A | N/A | N/A | N/A |
 | JSONL event log | written | N/A | read (incremental) | read (sequential) | N/A |
+| Diagnostics sidecar | written when `--diagnose` | written when `--diagnose` | read best-effort (incremental) | not yet wired | N/A |
 
 ### Credential Support (all HTCondor sources)
 
