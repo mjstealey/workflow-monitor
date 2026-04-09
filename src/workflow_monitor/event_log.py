@@ -204,6 +204,11 @@ class EventLogger:
         return self._path
 
     @property
+    def high_water_ts(self) -> float:
+        """Timestamp of the most recent job_state event processed."""
+        return self._high_water_ts
+
+    @property
     def resumed(self) -> bool:
         return self._resumed
 

@@ -74,6 +74,7 @@ def run_server(
     condor_kwargs: Optional[dict] = None,
     condor_constraint: Optional[str] = None,
     foreground: bool = False,
+    diagnose: bool = False,
 ) -> None:
     """Run the headless monitoring server.
 
@@ -116,6 +117,21 @@ def run_server(
     signal.signal(signal.SIGINT, _handle_signal)
 
     logger = EventLogger(info, db, log_path=log_path)
+
+    diag_engine = None
+    if diagnose:
+        from .diag_log import DiagnosticLogger
+        from .diagnostics_engine import DiagnosticsEngine
+
+        diag_path = DiagnosticLogger.path_from_event_log(logger.path)
+        diag_engine = DiagnosticsEngine(
+            info=info,
+            diag_log_path=diag_path,
+            poll_interval=poll_interval,
+            condor_constraint=condor_constraint,
+            condor_kwargs=ck,
+        )
+        print(f"Diagnostics enabled — sidecar: {diag_path}")
 
     def _poll_condor():
         try:
@@ -183,6 +199,12 @@ def run_server(
             history = _poll_history()
             pool = _poll_pool()
             logger.record(snap, condor_jobs, history, pool)
+            if diag_engine is not None:
+                try:
+                    diag_engine.tick(snap, condor_jobs, pool, logger.high_water_ts)
+                except Exception:
+                    import traceback
+                    traceback.print_exc()
 
             if snap.is_complete and not snap.is_running:
                 # One more poll for final DB flush
@@ -192,6 +214,11 @@ def run_server(
                 history = _poll_history()
                 pool = _poll_pool()
                 logger.record(snap, condor_jobs, history, pool)
+                if diag_engine is not None:
+                    try:
+                        diag_engine.tick(snap, condor_jobs, pool, logger.high_water_ts)
+                    except Exception:
+                        pass
                 break
 
             time.sleep(poll_interval)
@@ -204,6 +231,11 @@ def run_server(
             logger.close(snap, condor_history=history_cache, pool_status=pool_cache)
         else:
             logger.close()
+        if diag_engine is not None:
+            try:
+                diag_engine.close()
+            except Exception:
+                pass
         _cleanup_pid(pid_file)
 
 

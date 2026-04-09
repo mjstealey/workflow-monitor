@@ -48,6 +48,7 @@ A real-time terminal dashboard for monitoring running [Pegasus WMS](https://pega
 - **Pool resources** — queries `condor_status` for pool-wide slot, CPU, memory, and GPU availability; helps diagnose why jobs are idle
 - **Diagnostics** — pattern-matches HTCondor hold reasons and kickstart stderr to surface actionable suggestions for held and failed jobs
 - **Why-idle diagnostic** — one-shot `--why-idle` command explains why workflow jobs are stuck idle by checking pool capacity vs. job requirements, user fair-share priority, and negotiation cycle timing
+- **Diagnostics layer (`--diagnose`)** — opt-in stall detector + auto-diagnosis that runs alongside any monitoring mode and writes a `diagnostics-events.jsonl` sidecar file. Detects four kinds of stalls (`all_held`, `no_transitions`, `progress_plateau`, `idle_too_long`), runs the why-idle and held/failed analyzers automatically when a stall is confirmed, and surfaces a red `STALL` alert panel in the TUI. Remote SSH clients fetch the sidecar best-effort and display the same alerts.
 - **Zero workflow modification** — reads only from files Pegasus and HTCondor already produce
 - **Credential-aware** — supports IDTOKEN, X.509/GSI certificates, and password file auth for remote pools; local pools need nothing
 - **Flexible target** — point at a workflow base directory, a specific run directory, or a `braindump.yml` file directly
@@ -126,6 +127,10 @@ uv run workflow-monitor \
 # Diagnose why jobs are stuck idle (one-shot, prints and exits)
 uv run workflow-monitor --why-idle /path/to/diamond-workflow
 
+# Run with the diagnostics layer enabled (stall detection + auto-diagnosis sidecar)
+uv run workflow-monitor --diagnose /path/to/diamond-workflow
+uv run workflow-monitor --diagnose --serve /path/to/diamond-workflow
+
 # Stop a running server daemon
 uv run workflow-monitor --stop-server /path/to/diamond-workflow
 ```
@@ -134,7 +139,8 @@ uv run workflow-monitor --stop-server /path/to/diamond-workflow
 
 ```
 usage: workflow-monitor [-h] [--version] [--interval SECONDS] [--all-jobs]
-                        [--events N] [--once] [--why-idle] [--log [PATH]]
+                        [--events N] [--once] [--why-idle] [--diagnose]
+                        [--log [PATH]]
                         [--replay PATH] [--speed MULTIPLIER] [--serve]
                         [--serve-foreground] [--stop-server [PID_FILE]]
                         [--remote USER@HOST:/PATH] [--sync-interval SECONDS]
@@ -165,6 +171,7 @@ The `TARGET` is resolved in this order:
 | `--events N`, `-e` | `15` | Number of recent job-state events to show in the events panel. |
 | `--once` | off | Print the current status once and exit. Useful for scripting. Works with all modes including `--remote`. |
 | `--why-idle` | off | One-shot diagnostic: explain why workflow jobs are idle, then exit. Checks pool capacity, user priority, and negotiation cycles. |
+| `--diagnose` | off | Enable the diagnostics layer alongside any monitoring mode. Runs stall detection on each poll cycle, auto-diagnoses confirmed stalls and held/failed jobs, and writes a `diagnostics-events.jsonl` sidecar next to the event log. Surfaces a red `STALL` alert panel in the TUI. |
 | `--log [PATH]` | off | Log all events to a JSONL file. If `PATH` is omitted, writes to `{submit_dir}/workflow-events.jsonl`. |
 | `--replay PATH` | — | Replay a JSONL event log in the TUI dashboard (no live workflow needed). |
 | `--speed MULTIPLIER` | `1.0` | Replay speed multiplier (e.g. `4` = 4x speed, `0.5` = half speed). Only used with `--replay`. |
@@ -343,6 +350,53 @@ The diagnostic checks:
 
 Output includes tables for idle jobs, pool resources, and user priority, followed by numbered findings and actionable suggestions. Data sources that are unavailable (e.g., `condor_userprio` on a single-user pool) are silently skipped — the diagnostic works with whatever is available.
 
+### Diagnostics layer (`--diagnose`)
+
+An opt-in additive layer that runs alongside the normal monitoring loop. When enabled, the monitor instantiates a `DiagnosticsEngine` that owns a stall-detection state machine, a per-job dedup set for hold/failure analysis, and a sidecar JSONL writer. Diagnostic events are written to a **separate** file (`diagnostics-events.jsonl`) next to the main event log, so the canonical replay stream is never modified.
+
+```bash
+# Local live mode with the diagnostics overlay
+uv run workflow-monitor --diagnose /path/to/workflow
+
+# Headless server with sidecar (writes diagnostics-events.jsonl alongside workflow-events.jsonl)
+uv run workflow-monitor --diagnose --serve /path/to/workflow
+
+# --diagnose works with --once, --serve-foreground, and combined with --log
+uv run workflow-monitor --diagnose --log /path/to/workflow
+```
+
+**Stall detection heuristics** (evaluated in priority order):
+
+| # | Name | Trigger | Default threshold |
+|---|------|---------|-------------------|
+| 1 | `all_held` | Every active (non-done, non-failed) job is HELD | Immediate |
+| 2 | `no_transitions` | No job state transitions while jobs are queued or running | 60s |
+| 3 | `progress_plateau` | Done count flat while jobs are running | 120s |
+| 4 | `idle_too_long` | Jobs queued with 0 running | 120s |
+
+False-positive guards: a 60-second startup grace window, skip-when-complete, skip-when-no-jobs-submitted, and a **two-strike** confirmation rule (a heuristic must fire on two consecutive cycles before being confirmed). After a confirmed stall, a 120s cooldown suppresses repeated alerts of the same type. Stalls are automatically resolved when the done count advances or new state transitions arrive, emitting a `stall_resolved` event.
+
+**Auto-diagnosis on confirmed stall:**
+- If queued jobs exist, the engine reuses `why_idle._analyze()` to gather pool capacity, user priority, and negotiator data, emitting an `idle_diagnosis` event with structured findings and suggestions.
+- Independently of stall state, every poll cycle runs `diagnostics.collect_diagnostics()` over held/failed jobs, emitting `hold_diagnosis` / `failure_diagnosis` events for each newly problematic job (deduped by `severity:job_name`).
+
+**Diagnostic event types** (all written to `diagnostics-events.jsonl`):
+
+| Event | Emitted when |
+|-------|--------------|
+| `diag_start` | Engine starts. Includes `schema_version` and the engine's threshold config so a run is auditable. |
+| `stall_detected` | A heuristic fires on two consecutive cycles. Includes `stall_type`, `details`, and current job counts. |
+| `idle_diagnosis` | Immediately after `stall_detected` if queued jobs exist. Contains `findings`, `suggestions`, `requirement_mismatches`, and pool capacity. |
+| `hold_diagnosis` | A held job is matched against `_HOLD_PATTERNS`. Contains `summary`, `reason`, `suggestions`. |
+| `failure_diagnosis` | A failed job is analyzed (kickstart stderr + exit code). |
+| `stall_resolved` | Progress resumes after a confirmed stall. Includes `stall_duration_seconds`. |
+| `diag_end` | Engine shuts down cleanly. |
+| `diag_error` | An exception occurred inside `idle_diagnosis` or `held_failed` analysis. The monitor loop is never broken by engine errors. |
+
+**TUI alert panel:** When alerts are active, a red `STALL DETECTED` panel appears between the status bar and the main job table, summarizing the stall type, top findings/suggestions from the most recent idle diagnosis, and the latest held/failed job summaries. A `STALL` badge is also added to the header. The panel disappears when `stall_resolved` clears the active alerts.
+
+**Remote (`--remote`) integration:** The SSH client fetches `diagnostics-events.jsonl` best-effort on each sync cycle (silently skipped if the server isn't running with `--diagnose`, or if the file doesn't exist yet). Stall alerts surface in the remote TUI exactly as they do locally.
+
 ### Client/Server options
 
 | Flag | Default | Description |
@@ -519,8 +573,11 @@ In client/server mode, the data flows through a JSONL log file:
 | `event_log.py` | JSONL event logger with resume support. Tracks high-water timestamps to avoid duplicates. Fingerprint-based HTCondor poll dedup. Emits `workflow_stats` before `workflow_end`. |
 | `replay.py` | Loads a JSONL event log and replays it through the TUI at configurable speed. Handles multi-session logs. |
 | `server.py` | Headless daemon for client/server mode. Daemonizes via double-fork. Writes PID file for lifecycle management. |
-| `why_idle.py` | One-shot idle job diagnostic. Queries pool capacity, user priority, and negotiator timing. Produces human-readable analysis with Rich output. |
-| `remote.py` | SSH client engine. Incremental byte-offset fetching. Reconstructs workflow state from events. Supports `--once`. |
+| `why_idle.py` | One-shot idle job diagnostic. Queries pool capacity, user priority, and negotiator timing. Produces human-readable analysis with Rich output. The internal `_analyze()` is reused by the diagnostics engine. |
+| `remote.py` | SSH client engine. Incremental byte-offset fetching for both `workflow-events.jsonl` and the optional `diagnostics-events.jsonl` sidecar. Reconstructs workflow state from events. Supports `--once`. |
+| `stall_detector.py` | Stall detection state machine (normal → suspected → confirmed). Owns the four heuristics, two-strike confirmation, cooldown, startup grace, and resolution detection. |
+| `diag_log.py` | Append-only JSONL writer for the diagnostics sidecar. Emits `diag_start` (with schema version + engine config) and `diag_end` framing. |
+| `diagnostics_engine.py` | Single integration point for the `--diagnose` layer. Wraps `StallDetector`, runs `why_idle._analyze()` on confirmed stalls, runs `collect_diagnostics()` continuously with per-job dedup, and routes everything through `DiagnosticLogger`. Engine errors never break the monitor loop. |
 
 ## Related Projects
 

@@ -174,6 +174,16 @@ class RemoteEngine:
         # Incremental fetch state (byte offset into the remote file)
         self._remote_offset: int = 0
 
+        # Diagnostic sidecar — fetched best-effort, may not exist
+        self._diag_remote_path: str = str(
+            Path(self._remote_path).parent / "diagnostics-events.jsonl"
+        )
+        self._diag_local_path: Path = Path(self._tmpdir) / "diagnostics-events.jsonl"
+        self._diag_remote_offset: int = 0
+        self._diag_processed_lines: int = 0
+        self._diag_active_alerts: List[Dict[str, Any]] = []
+        self._diag_seen: bool = False
+
         # Replay state
         self._info: Optional[WorkflowInfo] = None
         self._job_state: Dict[int, Dict[str, Any]] = {}
@@ -206,6 +216,61 @@ class RemoteEngine:
                 return self._do_sync()
             self._remote_offset = new_offset
         return ok, err
+
+    def _sync_diagnostics(self) -> None:
+        """Best-effort fetch of the diagnostics sidecar. Failures are silent."""
+        ok, _err, new_offset = _fetch_file(
+            self._host, self._diag_remote_path, self._diag_local_path,
+            self._ssh_base, byte_offset=self._diag_remote_offset,
+        )
+        if not ok:
+            return
+        self._diag_seen = True
+        if new_offset < self._diag_remote_offset:
+            # File shrank — reset and refetch from scratch
+            self._diag_remote_offset = 0
+            self._diag_processed_lines = 0
+            self._diag_active_alerts.clear()
+            ok, _err, new_offset = _fetch_file(
+                self._host, self._diag_remote_path, self._diag_local_path,
+                self._ssh_base, byte_offset=0,
+            )
+            if not ok:
+                return
+        self._diag_remote_offset = new_offset
+
+    def _load_new_diag_events(self) -> None:
+        """Read new lines from the local diag sidecar and update active alerts."""
+        if not self._diag_local_path.exists():
+            return
+        try:
+            with open(self._diag_local_path) as fh:
+                total = 0
+                for i, line in enumerate(fh):
+                    total = i + 1
+                    if i < self._diag_processed_lines:
+                        continue
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        ev = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    et = ev.get("event_type")
+                    if et == "diag_start":
+                        # New daemon session — reset alert state
+                        self._diag_active_alerts.clear()
+                    elif et == "stall_resolved":
+                        self._diag_active_alerts.clear()
+                    elif et in (
+                        "stall_detected", "idle_diagnosis",
+                        "hold_diagnosis", "failure_diagnosis",
+                    ):
+                        self._diag_active_alerts.append(ev)
+                self._diag_processed_lines = total
+        except OSError:
+            pass
 
     def _load_new_events(self) -> List[Dict[str, Any]]:
         """Read any new lines from the local JSONL file since last read."""
@@ -445,6 +510,10 @@ class RemoteEngine:
             self._apply_event(ev)
         self._finalize_batch()
 
+        # Best-effort initial diagnostics sync
+        self._sync_diagnostics()
+        self._load_new_diag_events()
+
         if self._info is None:
             console.print(
                 "[bold red]No workflow_start header found in remote log.[/bold red]"
@@ -505,6 +574,11 @@ class RemoteEngine:
                         remote_info=remote_info,
                         condor_history=self._condor_history,
                         pool_status=self._pool_status,
+                        diag_alerts=list(self._diag_active_alerts) if self._diag_active_alerts else None,
+                        diag_path=(
+                            f"{self._host}:{self._diag_remote_path}"
+                            if self._diag_seen else None
+                        ),
                     )
                     live.update(layout)
 
@@ -522,6 +596,9 @@ class RemoteEngine:
                         for ev in new_events:
                             self._apply_event(ev)
                         self._finalize_batch()
+                        # Best-effort diagnostics sidecar fetch
+                        self._sync_diagnostics()
+                        self._load_new_diag_events()
                         last_sync = time.time()
 
             except KeyboardInterrupt:
@@ -537,6 +614,7 @@ class RemoteEngine:
         """Remove temporary files."""
         try:
             self._local_path.unlink(missing_ok=True)
+            self._diag_local_path.unlink(missing_ok=True)
             Path(self._tmpdir).rmdir()
         except OSError:
             pass

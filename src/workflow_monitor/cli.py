@@ -77,6 +77,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="One-shot diagnostic: explain why workflow jobs are idle, then exit",
     )
     p.add_argument(
+        "--diagnose",
+        action="store_true",
+        default=False,
+        help="Enable the diagnostics layer (stall detection + auto-diagnosis, "
+             "writes a diagnostics-events.jsonl sidecar file)",
+    )
+    p.add_argument(
         "--log",
         nargs="?",
         const="auto",
@@ -356,6 +363,7 @@ def main(argv: list | None = None) -> int:
                 condor_kwargs=condor_kwargs,
                 condor_constraint=condor_constraint,
                 foreground=args.serve_foreground,
+                diagnose=args.diagnose,
             )
         return 0
 
@@ -371,6 +379,7 @@ def main(argv: list | None = None) -> int:
             condor_constraint=condor_constraint,
             once=args.once,
             log_path=log_path,
+            diagnose=args.diagnose,
         )
 
     return 0

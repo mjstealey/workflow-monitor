@@ -68,6 +68,7 @@ def _make_header(
     refresh_ts: float,
     replay_info: Optional[dict] = None,
     remote_info: Optional[dict] = None,
+    stall_active: bool = False,
 ) -> Panel:
     grid = Table.grid(expand=True, padding=(0, 0))
     grid.add_column(ratio=1)
@@ -91,6 +92,9 @@ def _make_header(
     else:
         title.append("  ")
         title.append(" LIVE ", style="bold white on green")
+    if stall_active:
+        title.append("  ")
+        title.append(" STALL ", style="bold white on red")
 
     right_col = Text(no_wrap=True)
     if replay_info is not None or remote_info is not None:
@@ -555,6 +559,73 @@ def _make_diagnostics_panel(
     )
 
 
+# ─── Stall alert panel ───────────────────────────────────────────────────────
+
+def _make_stall_alert_panel(
+    alerts: List[Dict],
+    diag_path: Optional[str] = None,
+) -> Panel:
+    """Render a compact alert panel summarizing active stall diagnostics.
+
+    *alerts* is the list of recent diagnostic events (stall_detected,
+    idle_diagnosis, hold_diagnosis, failure_diagnosis) collected since the
+    last stall_resolved.
+    """
+    body = Text()
+
+    # Pull the most recent stall_detected for the headline
+    stall = next(
+        (a for a in reversed(alerts) if a.get("event_type") == "stall_detected"),
+        None,
+    )
+    if stall is not None:
+        stype = stall.get("stall_type", "unknown")
+        details = stall.get("details", "")
+        body.append(f"Stall type: ", style="bold")
+        body.append(f"{stype}\n", style="bold yellow")
+        if details:
+            body.append(f"  {details}\n", style="white")
+
+    # Most recent idle diagnosis
+    idle = next(
+        (a for a in reversed(alerts) if a.get("event_type") == "idle_diagnosis"),
+        None,
+    )
+    if idle is not None:
+        findings = idle.get("findings") or []
+        suggestions = idle.get("suggestions") or []
+        for f in findings[:3]:
+            body.append("  • ", style="yellow")
+            body.append(f"{f}\n", style="white")
+        for s in suggestions[:2]:
+            body.append("  → ", style="green")
+            body.append(f"{s}\n", style="white")
+
+    # Hold/failure diagnoses (one line each, latest few)
+    held_failed = [
+        a for a in alerts
+        if a.get("event_type") in ("hold_diagnosis", "failure_diagnosis")
+    ]
+    for d in held_failed[-3:]:
+        body.append("  ! ", style="red")
+        body.append(f"{d.get('job_name', '?')}: ", style="bold red")
+        body.append(f"{d.get('summary', '')}\n", style="white")
+
+    if diag_path:
+        body.append("Sidecar: ", style="dim")
+        body.append(f"{diag_path}", style="dim cyan")
+
+    if len(body) == 0:
+        body.append("Diagnostics active", style="bold yellow")
+
+    return Panel(
+        body,
+        title="[bold red]STALL DETECTED[/bold red]",
+        border_style="bold red",
+        padding=(0, 1),
+    )
+
+
 # ─── Full layout assembly ─────────────────────────────────────────────────────
 
 def build_layout(
@@ -569,8 +640,11 @@ def build_layout(
     submit_dir: Optional[Path] = None,
     condor_history: Optional[List] = None,
     pool_status: Optional[PoolSummary] = None,
+    diag_alerts: Optional[List[Dict]] = None,
+    diag_path: Optional[str] = None,
 ) -> Layout:
     has_issues = snap.held_count() > 0 or snap.failed_count() > 0
+    has_alerts = bool(diag_alerts)
 
     # Calculate diagnostics panel height based on number of issues
     diag_height = 0
@@ -584,6 +658,23 @@ def build_layout(
         Layout(name="header", size=4),
         Layout(name="status", size=5),
     ]
+    if has_alerts:
+        # 3 fixed lines + per-finding/suggestion/job lines, capped
+        n_lines = 3
+        idle = next(
+            (a for a in reversed(diag_alerts)
+             if a.get("event_type") == "idle_diagnosis"),
+            None,
+        )
+        if idle:
+            n_lines += min(3, len(idle.get("findings") or []))
+            n_lines += min(2, len(idle.get("suggestions") or []))
+        n_lines += min(3, sum(
+            1 for a in diag_alerts
+            if a.get("event_type") in ("hold_diagnosis", "failure_diagnosis")
+        ))
+        alert_height = max(5, min(n_lines + 2, 12))
+        parts.append(Layout(name="stall_alert", size=alert_height))
     if has_issues:
         parts.append(Layout(name="diagnostics", size=diag_height))
     parts.append(Layout(name="main"))
@@ -610,8 +701,14 @@ def build_layout(
         )
         layout["infra"].update(_make_infra_summary(snap))
 
-    layout["header"].update(_make_header(info, snap, refresh_ts, replay_info=replay_info, remote_info=remote_info))
+    layout["header"].update(_make_header(
+        info, snap, refresh_ts,
+        replay_info=replay_info, remote_info=remote_info,
+        stall_active=has_alerts,
+    ))
     layout["status"].update(_make_status_bar(snap))
+    if has_alerts:
+        layout["stall_alert"].update(_make_stall_alert_panel(diag_alerts, diag_path=diag_path))
     if has_issues:
         layout["diagnostics"].update(_make_diagnostics_panel(snap, condor_jobs=condor_jobs, submit_dir=submit_dir))
     layout["jobs"].update(_make_job_table(snap, show_all=show_all, condor_jobs=condor_jobs, condor_history=condor_history))
@@ -632,6 +729,7 @@ def run_monitor(
     condor_kwargs: Optional[dict] = None,
     once: bool = False,
     log_path: Optional[Path] = None,
+    diagnose: bool = False,
 ) -> None:
     """Run the live terminal dashboard.
 
@@ -658,6 +756,25 @@ def run_monitor(
             console.print(f"[dim]Resuming event log at {logger.path}[/dim]")
         else:
             console.print(f"[dim]Logging events to {logger.path}[/dim]")
+
+    diag_engine = None
+    diag_active_alerts: List[Dict] = []
+    if diagnose:
+        from .diag_log import DiagnosticLogger
+        from .diagnostics_engine import DiagnosticsEngine
+
+        if logger is not None:
+            diag_path = DiagnosticLogger.path_from_event_log(logger.path)
+        else:
+            diag_path = info.submit_dir / "diagnostics-events.jsonl"
+        diag_engine = DiagnosticsEngine(
+            info=info,
+            diag_log_path=diag_path,
+            poll_interval=poll_interval,
+            condor_constraint=condor_constraint,
+            condor_kwargs=ck,
+        )
+        console.print(f"[dim]Diagnostics sidecar: {diag_path}[/dim]")
 
     def _poll_condor() -> List:
         try:
@@ -728,6 +845,21 @@ def run_monitor(
         ts = time.time()
         if logger is not None:
             logger.record(snap, condor_jobs, history, pool)
+        if diag_engine is not None:
+            try:
+                hwts = logger.high_water_ts if logger is not None else 0.0
+                events = diag_engine.tick(snap, condor_jobs, pool, hwts)
+                for ev in events:
+                    et = ev.get("event_type")
+                    if et == "stall_resolved":
+                        diag_active_alerts.clear()
+                    elif et in (
+                        "stall_detected", "idle_diagnosis",
+                        "hold_diagnosis", "failure_diagnosis",
+                    ):
+                        diag_active_alerts.append(ev)
+            except Exception:
+                pass
         return snap, condor_jobs, history, pool, ts
 
     if once:
@@ -746,6 +878,11 @@ def run_monitor(
         _print_final_summary(console, snap, condor_jobs=condor_jobs, submit_dir=info.submit_dir, stats=wf_stats)
         if logger is not None:
             logger.close(snap, condor_history=history, pool_status=pool)
+        if diag_engine is not None:
+            try:
+                diag_engine.close()
+            except Exception:
+                pass
         return
 
     with Live(
@@ -762,6 +899,8 @@ def run_monitor(
                     submit_dir=info.submit_dir,
                     condor_history=history,
                     pool_status=pool,
+                    diag_alerts=list(diag_active_alerts) if diag_active_alerts else None,
+                    diag_path=str(diag_engine.path) if diag_engine else None,
                 )
                 live.update(layout)
 
@@ -773,7 +912,9 @@ def run_monitor(
                         build_layout(info, snap, show_all, condor_jobs, events_n, ts,
                                      submit_dir=info.submit_dir,
                                      condor_history=history,
-                                     pool_status=pool)
+                                     pool_status=pool,
+                                     diag_alerts=list(diag_active_alerts) if diag_active_alerts else None,
+                                     diag_path=str(diag_engine.path) if diag_engine else None)
                     )
                     break
 
@@ -787,6 +928,11 @@ def run_monitor(
     _print_final_summary(console, snap, condor_jobs=condor_jobs, submit_dir=info.submit_dir, stats=wf_stats)
     if logger is not None:
         logger.close(snap, condor_history=history, pool_status=pool)
+    if diag_engine is not None:
+        try:
+            diag_engine.close()
+        except Exception:
+            pass
 
 
 def _format_eff_range(lo: Optional[float], hi: Optional[float], mean: Optional[float]) -> str:
