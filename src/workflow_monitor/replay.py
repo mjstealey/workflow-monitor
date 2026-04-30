@@ -324,7 +324,7 @@ class ReplayEngine:
 
     # ── Replay loop ──────────────────────────────────────────────────────────
 
-    def run(self, show_all: bool = False) -> None:
+    def run(self, show_all: bool = False, sort_by_activity: bool = True) -> None:
         """Run the replay in the terminal."""
         frames = self._build_frames()
         if not frames:
@@ -398,6 +398,7 @@ class ReplayEngine:
                         replay_info=replay_info,
                         condor_history=condor_history,
                         pool_status=pool_status,
+                        sort_by_activity=sort_by_activity,
                     )
                     live.update(layout)
 

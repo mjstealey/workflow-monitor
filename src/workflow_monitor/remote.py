@@ -481,7 +481,7 @@ class RemoteEngine:
             poll_time=now,
         )
 
-    def run(self, show_all: bool = False, once: bool = False) -> None:
+    def run(self, show_all: bool = False, once: bool = False, sort_by_activity: bool = True) -> None:
         """Run the remote monitoring TUI."""
         console = Console()
 
@@ -540,7 +540,7 @@ class RemoteEngine:
             console.print(_make_status_bar(snap))
             if snap.held_count() > 0 or snap.failed_count() > 0:
                 console.print(_make_diagnostics_panel(snap, condor_jobs=self._condor_jobs))
-            console.print(_make_job_table(snap, show_all=show_all, condor_jobs=self._condor_jobs, condor_history=self._condor_history))
+            console.print(_make_job_table(snap, show_all=show_all, condor_jobs=self._condor_jobs, condor_history=self._condor_history, sort_by_activity=sort_by_activity))
             if snap.infra_jobs():
                 console.print(_make_infra_summary(snap))
             if self._pool_status is not None:
@@ -579,6 +579,7 @@ class RemoteEngine:
                             f"{self._host}:{self._diag_remote_path}"
                             if self._diag_seen else None
                         ),
+                        sort_by_activity=sort_by_activity,
                     )
                     live.update(layout)
 

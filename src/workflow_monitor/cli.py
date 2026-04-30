@@ -58,6 +58,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Show all job types, not just compute jobs",
     )
     p.add_argument(
+        "--sort-by-activity",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Order the job table by most recent activity, with RUNNING jobs "
+             "always at the top (default: enabled). Use --no-sort-by-activity "
+             "to keep the original DAG/submit order.",
+    )
+    p.add_argument(
         "--events", "-e",
         type=int,
         default=15,
@@ -75,6 +83,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         help="One-shot diagnostic: explain why workflow jobs are idle, then exit",
+    )
+    p.add_argument(
+        "--remap-submit-dir",
+        choices=("auto", "always", "never"),
+        default="auto",
+        help="How to interpret submit_dir from braindump.yml: "
+             "'auto' (default) rebases onto the braindump.yml's parent "
+             "directory only when the recorded path doesn't exist locally; "
+             "'always' forces rebasing (use for container-planned workflows "
+             "viewed from the host); 'never' trusts the recorded path verbatim.",
     )
     p.add_argument(
         "--diagnose",
@@ -217,7 +235,7 @@ def main(argv: list | None = None) -> int:
                 speed=args.speed,
                 events_n=args.events,
             )
-            engine.run(show_all=args.all_jobs)
+            engine.run(show_all=args.all_jobs, sort_by_activity=args.sort_by_activity)
         except (ValueError, json.JSONDecodeError) as exc:
             print(f"[error] {exc}", file=sys.stderr)
             return 1
@@ -235,7 +253,7 @@ def main(argv: list | None = None) -> int:
                 ssh_config=args.ssh_config,
                 ssh_identity=args.ssh_identity,
             )
-            engine.run(show_all=args.all_jobs, once=args.once)
+            engine.run(show_all=args.all_jobs, once=args.once, sort_by_activity=args.sort_by_activity)
         except (ValueError, json.JSONDecodeError) as exc:
             print(f"[error] {exc}", file=sys.stderr)
             return 1
@@ -249,7 +267,7 @@ def main(argv: list | None = None) -> int:
             # Locate workflow to find default log path
             target = Path(args.target)
             try:
-                info = load_braindump(target)
+                info = load_braindump(target, remap=args.remap_submit_dir)
             except FileNotFoundError as exc:
                 print(f"[error] {exc}", file=sys.stderr)
                 return 1
@@ -268,7 +286,7 @@ def main(argv: list | None = None) -> int:
 
     # ── Locate workflow ───────────────────────────────────────────────────────
     try:
-        info = load_braindump(target)
+        info = load_braindump(target, remap=args.remap_submit_dir)
     except FileNotFoundError as exc:
         print(f"[error] {exc}", file=sys.stderr)
         return 1
@@ -316,10 +334,14 @@ def main(argv: list | None = None) -> int:
         if getattr(args, "password_file", None):
             condor_kwargs_idle["password_file"] = args.password_file
 
-        submit_dir_esc = str(info.submit_dir).replace("\\", "\\\\").replace('"', '\\"')
+        # Match against the path the planner recorded — that's what the schedd
+        # sees in Cmd, even when this host views the submit_dir under a
+        # different mount (e.g. a container bind mount).
+        recorded_submit_str = str(info.recorded_submit_dir)
+        submit_dir_esc = recorded_submit_str.replace("\\", "\\\\").replace('"', '\\"')
         condor_constraint_idle = (
             f'Cmd =!= UNDEFINED'
-            f' && substr(Cmd, 0, {len(str(info.submit_dir))}) == "{submit_dir_esc}"'
+            f' && substr(Cmd, 0, {len(recorded_submit_str)}) == "{submit_dir_esc}"'
         )
 
         with StampedeDB(db_path, wf_uuid=info.wf_uuid) as db:
@@ -343,11 +365,14 @@ def main(argv: list | None = None) -> int:
     # ── Build condor constraint scoped to this workflow ───────────────────────
     # On shared schedds, condor_q returns all users' jobs.  Restrict to jobs
     # whose Cmd lives under this workflow's submit directory so the JSONL log
-    # (and live display) only contain relevant entries.
-    submit_dir_esc = str(info.submit_dir).replace("\\", "\\\\").replace('"', '\\"')
+    # (and live display) only contain relevant entries. Use the path the
+    # planner recorded — when planning happened inside a container the host's
+    # view of submit_dir differs from what the schedd reports in Cmd.
+    recorded_submit_str = str(info.recorded_submit_dir)
+    submit_dir_esc = recorded_submit_str.replace("\\", "\\\\").replace('"', '\\"')
     condor_constraint = (
         f'Cmd =!= UNDEFINED'
-        f' && substr(Cmd, 0, {len(str(info.submit_dir))}) == "{submit_dir_esc}"'
+        f' && substr(Cmd, 0, {len(recorded_submit_str)}) == "{submit_dir_esc}"'
     )
 
     # ── Serve mode (headless daemon) ─────────────────────────────────────────
@@ -380,6 +405,7 @@ def main(argv: list | None = None) -> int:
             once=args.once,
             log_path=log_path,
             diagnose=args.diagnose,
+            sort_by_activity=args.sort_by_activity,
         )
 
     return 0

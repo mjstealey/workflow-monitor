@@ -193,11 +193,28 @@ def _make_status_bar(snap: WorkflowSnapshot) -> Panel:
 
 # ─── Job details table ────────────────────────────────────────────────────────
 
+def _activity_sort_key(job) -> tuple:
+    """Stable two-tier sort key for the job table.
+
+    Tier 0: RUNNING jobs at the top (most recently started first).
+    Tier 1: jobs with any activity, by most-recent timestamp.
+    Tier 2: UNSUBMITTED / no-timestamp jobs at the bottom (original order
+    preserved by Python's stable sort).
+    """
+    if job.disp_state == "RUNNING":
+        return (0, -(job.start_time or job.submit_time or 0))
+    ts = job.end_time or job.start_time or job.submit_time
+    if ts is None:
+        return (2, 0)
+    return (1, -ts)
+
+
 def _make_job_table(
     snap: WorkflowSnapshot,
     show_all: bool = False,
     condor_jobs: Optional[List] = None,
     condor_history: Optional[List] = None,
+    sort_by_activity: bool = True,
 ) -> Panel:
     # Build a condor lookup by DAGNodeName -> status
     condor_map: dict = {}
@@ -216,6 +233,8 @@ def _make_job_table(
                 history_map[node] = hj
 
     jobs_to_show = snap.jobs if show_all else snap.compute_jobs()
+    if sort_by_activity:
+        jobs_to_show = sorted(jobs_to_show, key=_activity_sort_key)
 
     table = Table(
         box=box.SIMPLE,
@@ -642,6 +661,7 @@ def build_layout(
     pool_status: Optional[PoolSummary] = None,
     diag_alerts: Optional[List[Dict]] = None,
     diag_path: Optional[str] = None,
+    sort_by_activity: bool = True,
 ) -> Layout:
     has_issues = snap.held_count() > 0 or snap.failed_count() > 0
     has_alerts = bool(diag_alerts)
@@ -711,7 +731,7 @@ def build_layout(
         layout["stall_alert"].update(_make_stall_alert_panel(diag_alerts, diag_path=diag_path))
     if has_issues:
         layout["diagnostics"].update(_make_diagnostics_panel(snap, condor_jobs=condor_jobs, submit_dir=submit_dir))
-    layout["jobs"].update(_make_job_table(snap, show_all=show_all, condor_jobs=condor_jobs, condor_history=condor_history))
+    layout["jobs"].update(_make_job_table(snap, show_all=show_all, condor_jobs=condor_jobs, condor_history=condor_history, sort_by_activity=sort_by_activity))
     layout["events"].update(_make_events_panel(snap, n=events_n))
 
     return layout
@@ -730,6 +750,7 @@ def run_monitor(
     once: bool = False,
     log_path: Optional[Path] = None,
     diagnose: bool = False,
+    sort_by_activity: bool = True,
 ) -> None:
     """Run the live terminal dashboard.
 
@@ -868,7 +889,7 @@ def run_monitor(
         console.print(_make_status_bar(snap))
         if snap.held_count() > 0 or snap.failed_count() > 0:
             console.print(_make_diagnostics_panel(snap, condor_jobs=condor_jobs, submit_dir=info.submit_dir))
-        console.print(_make_job_table(snap, show_all=show_all, condor_jobs=condor_jobs, condor_history=history))
+        console.print(_make_job_table(snap, show_all=show_all, condor_jobs=condor_jobs, condor_history=history, sort_by_activity=sort_by_activity))
         if snap.infra_jobs():
             console.print(_make_infra_summary(snap))
         if pool is not None:
@@ -901,6 +922,7 @@ def run_monitor(
                     pool_status=pool,
                     diag_alerts=list(diag_active_alerts) if diag_active_alerts else None,
                     diag_path=str(diag_engine.path) if diag_engine else None,
+                    sort_by_activity=sort_by_activity,
                 )
                 live.update(layout)
 
@@ -914,7 +936,8 @@ def run_monitor(
                                      condor_history=history,
                                      pool_status=pool,
                                      diag_alerts=list(diag_active_alerts) if diag_active_alerts else None,
-                                     diag_path=str(diag_engine.path) if diag_engine else None)
+                                     diag_path=str(diag_engine.path) if diag_engine else None,
+                                     sort_by_activity=sort_by_activity)
                     )
                     break
 

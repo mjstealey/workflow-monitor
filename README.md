@@ -13,15 +13,15 @@ A real-time terminal dashboard for monitoring running [Pegasus WMS](https://pega
 ╰───────────────────────────────────────────────────────────────────────────────────────────╯
 ╭──────────────────────────────── Compute Jobs ─────────────────────────────────────────────╮
 │  Job                        Type    State    Exit  Duration  Args              Mem    Req │
-│  fetch_earthquake_data      compute SUCCESS   0        8s   --region cali…  69.1M  1c/2G  │
-│  detect_seismic_anomalies   compute SUCCESS   0       11s   --input cali…  101.7M  1c/2G  │
-│  analyze_seismic_gaps       compute SUCCESS   0       10s   --input cali…  101.6M  1c/2G  │
-│  analyze_seismic_patterns   compute SUCCESS   0        9s   --input cali…  101.4M  1c/2G  │
+│  visualize_seismic_gaps     compute RUNNING   -        5s   --input cali…       -  1c/2G  │
 │  cluster_seismic_zones      compute RUNNING   -       18s   --input cali…       -  1c/2G  │
-│  predict_aftershocks        compute SUCCESS   0       10s   --input cali…  101.1M  1c/4G  │
 │  assess_seismic_hazard      compute RUNNING   -       42s   --input cali…       -  1c/2G  │
 │  visualize_earthquakes      compute SUCCESS   0       11s   --input cali…  324.0M  1c/2G  │
-│  visualize_seismic_gaps     compute RUNNING   -        5s   --input cali…       -  1c/2G  │
+│  predict_aftershocks        compute SUCCESS   0       10s   --input cali…  101.1M  1c/4G  │
+│  analyze_seismic_patterns   compute SUCCESS   0        9s   --input cali…  101.4M  1c/2G  │
+│  analyze_seismic_gaps       compute SUCCESS   0       10s   --input cali…  101.6M  1c/2G  │
+│  detect_seismic_anomalies   compute SUCCESS   0       11s   --input cali…  101.7M  1c/2G  │
+│  fetch_earthquake_data      compute SUCCESS   0        8s   --region cali…  69.1M  1c/2G  │
 │  visualize_aftershock_…     compute QUEUED    -        -    --input cali…       -  1c/2G  │
 │  visualize_seismic_hazard   compute   -       -        -    --input cali…       -  1c/2G  │
 ╰───────────────────────────────────────────────────────────────────────────────────────────╯
@@ -49,6 +49,7 @@ A real-time terminal dashboard for monitoring running [Pegasus WMS](https://pega
 - **Diagnostics** — pattern-matches HTCondor hold reasons and kickstart stderr to surface actionable suggestions for held and failed jobs
 - **Why-idle diagnostic** — one-shot `--why-idle` command explains why workflow jobs are stuck idle by checking pool capacity vs. job requirements, user fair-share priority, and negotiation cycle timing
 - **Diagnostics layer (`--diagnose`)** — opt-in stall detector + auto-diagnosis that runs alongside any monitoring mode and writes a `diagnostics-events.jsonl` sidecar file. Detects four kinds of stalls (`all_held`, `no_transitions`, `progress_plateau`, `idle_too_long`), runs the why-idle and held/failed analyzers automatically when a stall is confirmed, and surfaces a red `STALL` alert panel in the TUI. Remote SSH clients fetch the sidecar best-effort and display the same alerts.
+- **Activity-sorted job table** — by default the Compute Jobs table places `RUNNING` jobs at the top (most recently started first), then everything else by most-recent activity, so currently-active work is always visible without scrolling. Disable with `--no-sort-by-activity` to keep the original DAG/submit order.
 - **Zero workflow modification** — reads only from files Pegasus and HTCondor already produce
 - **Credential-aware** — supports IDTOKEN, X.509/GSI certificates, and password file auth for remote pools; local pools need nothing
 - **Flexible target** — point at a workflow base directory, a specific run directory, or a `braindump.yml` file directly
@@ -139,6 +140,7 @@ uv run workflow-monitor --stop-server /path/to/diamond-workflow
 
 ```
 usage: workflow-monitor [-h] [--version] [--interval SECONDS] [--all-jobs]
+                        [--sort-by-activity | --no-sort-by-activity]
                         [--events N] [--once] [--why-idle] [--diagnose]
                         [--log [PATH]]
                         [--replay PATH] [--speed MULTIPLIER] [--serve]
@@ -168,6 +170,7 @@ The `TARGET` is resolved in this order:
 |------|---------|-------------|
 | `--interval SECONDS`, `-i` | `2.0` | Stampede database poll interval in seconds. |
 | `--all-jobs`, `-a` | off | Show all job types (stage-in/out, cleanup, etc.) in the job table, not just compute jobs. |
+| `--sort-by-activity` / `--no-sort-by-activity` | on | Order the Compute Jobs table by most-recent activity (`RUNNING` first, then by most-recent timestamp; `UNSUBMITTED` at the bottom). Use `--no-sort-by-activity` to keep the underlying DAG/submit order. See [Compute Jobs](#compute-jobs-or-all-jobs-with---all-jobs). |
 | `--events N`, `-e` | `15` | Number of recent job-state events to show in the events panel. |
 | `--once` | off | Print the current status once and exit. Useful for scripting. Works with all modes including `--remote`. |
 | `--why-idle` | off | One-shot diagnostic: explain why workflow jobs are idle, then exit. Checks pool capacity, user priority, and negotiation cycles. |
@@ -175,6 +178,7 @@ The `TARGET` is resolved in this order:
 | `--log [PATH]` | off | Log all events to a JSONL file. If `PATH` is omitted, writes to `{submit_dir}/workflow-events.jsonl`. |
 | `--replay PATH` | — | Replay a JSONL event log in the TUI dashboard (no live workflow needed). |
 | `--speed MULTIPLIER` | `1.0` | Replay speed multiplier (e.g. `4` = 4x speed, `0.5` = half speed). Only used with `--replay`. |
+| `--remap-submit-dir {auto,always,never}` | `auto` | How to interpret `submit_dir` from `braindump.yml`. `auto` (default) rebases onto the directory containing the discovered `braindump.yml` only when the recorded path doesn't exist locally — handles workflows planned inside a container and viewed from the host via a bind mount. `always` forces rebasing. `never` trusts the recorded path verbatim. See [Container-planned workflows](#container-planned-workflows). |
 | `--version`, `-V` | — | Print the version and exit. |
 
 ### HTCondor options
@@ -207,6 +211,35 @@ The monitor has four operating modes, each indicated by a badge in the dashboard
 | **Server** | *(headless, no TUI)* | stampede.db + condor_q → JSONL | Local Pegasus workflow + HTCondor |
 | **Remote/SSH** | `SSH` (blue) | JSONL via SSH | SSH access to server host |
 | **Replay** | `REPLAY` (orange) | JSONL file | Nothing (fully offline) |
+
+There are also three diagnostic-oriented options that compose with any of the modes above:
+
+| Option | What it does | When to use |
+|--------|--------------|-------------|
+| `--once` | Polls once, prints a static dashboard, exits | Cron jobs, CI status checks, scripting, quick "is it still running?" probes |
+| `--why-idle` | One-shot diagnostic for stuck-idle workflows | When jobs sit `QUEUED` and you don't know why (capacity? priority? requirements mismatch?) |
+| `--diagnose` | Continuous stall detection + auto-diagnosis sidecar | Long unattended runs — surfaces alerts when something goes wrong without you having to watch |
+
+### Choosing the right mode
+
+| Situation | Recommended invocation |
+|-----------|------------------------|
+| You're SSH'd into the submit node and want to watch a workflow | `uv run workflow-monitor /path/to/run` (live mode) |
+| You want to see status from your laptop while the workflow runs on a remote machine | Start `--serve` on the submit node, then `--remote` from your laptop |
+| The submit node is reachable only via a bastion / ProxyJump | `--remote` with `--ssh-config` and `--ssh-identity` (see [FABRIC example](#example-fabric-testbed)) |
+| You're debugging a completed workflow and have its event log | `--replay path/to/workflow-events.jsonl` |
+| You want to keep a historical record of how a run unfolded | `--log` (live mode + log) or `--serve` (headless logger) |
+| A long-running workflow has stalled and you want to know why | `--why-idle /path/to/run` for an immediate one-shot diagnosis |
+| You're starting a long unattended run and want stall alerts surfaced automatically | Add `--diagnose` to whichever mode you're using |
+| You need to script a status check or feed status into another tool | `--once` (works in live, replay, and remote modes) |
+| The workflow was planned inside a container, viewed from the host | Live mode works as-is — `--remap-submit-dir auto` (default) detects and remaps. See [Container-planned workflows](#container-planned-workflows). |
+
+A few rules of thumb:
+
+- **Live is the richest mode.** Kickstart stderr is parsed directly from disk, every diagnostic source is available, and there's no SSH latency. Prefer it whenever you're on the submit node.
+- **Server + Remote is for operators away from the submit node.** The server captures HTCondor ClassAds (including hold reasons) into the JSONL so the remote client gets the same diagnostics — but only what was captured at write time.
+- **Replay is fully offline.** It does not require Pegasus, HTCondor, or even the original submit directory. The JSONL is self-contained.
+- **`--once`, `--why-idle`, and `--diagnose` are orthogonal to the modes.** `--once` works in live, replay, and remote; `--why-idle` and `--diagnose` work locally; `--diagnose` events propagate to remote clients via a sidecar JSONL.
 
 ### Live mode (default)
 
@@ -397,6 +430,40 @@ False-positive guards: a 60-second startup grace window, skip-when-complete, ski
 
 **Remote (`--remote`) integration:** The SSH client fetches `diagnostics-events.jsonl` best-effort on each sync cycle (silently skipped if the server isn't running with `--diagnose`, or if the file doesn't exist yet). Stall alerts surface in the remote TUI exactly as they do locally.
 
+### Container-planned workflows
+
+When a workflow is planned and submitted inside a container that bind-mounts data to the host, two things differ from a normal submit:
+
+1. The recorded `submit_dir` in `braindump.yml` is the **container's** path (e.g. `/work/work/pegasus/.../run0001`), not the host path you see at the bind-mount destination (e.g. `/Users/me/project/work/pegasus/.../run0001`).
+2. HTCondor inside the container reports job `Cmd` values rooted at the container path, while the host's terminal can only access the host path.
+
+The monitor handles both:
+
+**Path remapping (`--remap-submit-dir`)**
+
+`--remap-submit-dir` is `auto` by default. The monitor checks whether the recorded `submit_dir` exists on this host:
+
+- **Recorded path exists** (normal submit-host case) → trust it verbatim. Behavior unchanged.
+- **Recorded path does not exist** (container-planned, host-viewed case) → rebase `submit_dir` onto the directory containing the discovered `braindump.yml`, and rebase `basedir` using the same depth offset.
+
+To force rebasing regardless: `--remap-submit-dir always`. To disable auto-detection (e.g. on a network filesystem where the recorded path coincidentally exists but is wrong): `--remap-submit-dir never`.
+
+**`Cmd` constraint preservation**
+
+When restricting `condor_q` results to "this workflow only", the monitor matches against the **recorded** (un-remapped) `submit_dir` — because that's what the schedd reports in `Cmd`. This means the filter works correctly whether you're querying the host's pool or the container's pool.
+
+**Querying the container's HTCondor pool from the host**
+
+Path remapping fixes the file-side mismatch but does **not** redirect HTCondor calls. By default the monitor talks to whichever pool the host's `condor` environment points at — which is usually *your host's* pool, not the container's. If `--why-idle` or the Pool Resources panel shows numbers that don't match what the workflow actually sees, you have three options:
+
+- **Option A (cleanest):** run `workflow-monitor` *inside* the container. Same DAG state files (just a different mount root), and direct access to the container's pool. Requires installing the package into the image or bind-mounting the source and `pip install -e`.
+
+- **Option B (env vars):** point the host's HTCondor CLI at the container's collector with `_CONDOR_COLLECTOR_HOST=...`. Works only if the collector port is reachable from the host *and* the container's auth allows host connections. Equivalent to passing `--collector` and (optionally) `--schedd` to `workflow-monitor`.
+
+- **Option C (publish ports):** publish the container's condor port to the host (e.g. `-p 127.0.0.1:9619:9618` in `docker run`) and use a [shared-port + TCP-forwarding](https://htcondor.readthedocs.io/) configuration inside the container. Then `--collector localhost:9619` from the host. This is the most permanent setup; see the troubleshooting section below for the specific config knobs and a port-collision warning.
+
+In all three options, `--remap-submit-dir auto` continues to do the right thing for file-side paths.
+
 ### Client/Server options
 
 | Flag | Default | Description |
@@ -431,7 +498,17 @@ Diagnostics are powered by pattern matching against:
 In live mode, kickstart `.out.000` files are parsed directly from the submit directory. In SSH/remote mode, diagnostics use the HTCondor ClassAd data captured in `htcondor_poll` JSONL events.
 
 ### Compute Jobs (or All Jobs with `--all-jobs`)
-A table of individual jobs with:
+A table of individual jobs.
+
+**Row ordering.** By default (`--sort-by-activity`, on), rows use a stable two-tier sort so that currently-active work is always visible without scrolling — important when the workflow has more compute jobs than fit on a screen:
+
+1. `RUNNING` jobs at the top, most recently started first.
+2. Everything else by the most recent timestamp among `end_time`, `start_time`, and `submit_time` (newest first) — so jobs that just completed, failed, or were held bubble up next.
+3. `UNSUBMITTED` jobs (no timestamps yet) at the bottom, in their original DAG order.
+
+Pass `--no-sort-by-activity` to keep the original DAG/submit order — useful when you want a deterministic top-to-bottom view that mirrors the DAG structure (or when the active sort feels too jumpy at very short refresh intervals).
+
+Columns:
 
 | Column | Description |
 |--------|-------------|
@@ -605,8 +682,25 @@ uv run workflow-monitor --remote user@host:/path/to/workflow-events.jsonl
 
 ## Troubleshooting
 
-**"Stampede database not found"**
-The `*.stampede.db` file is created by `pegasus-monitord` shortly after `pegasus-run` is called. If the workflow was planned with `pegasus-plan` but not yet started with `pegasus-run`, this file will not exist. Start the workflow first, then run the monitor.
+### Locating the workflow
+
+**"Cannot find braindump.yml at or under: ..."**
+The target you passed in does not contain (or recursively contain) a `braindump.yml`. Confirm the workflow has been planned with `pegasus-plan` — `braindump.yml` is written next to the DAG file inside `runNNNN/`. Pass either the run directory directly, the workflow base directory (the monitor picks the highest-numbered `runNNNN`), or the `braindump.yml` path itself.
+
+**"Stampede database not found in: /some/path"**
+Two distinct causes:
+
+1. **`pegasus-monitord` hasn't created it yet.** The `*.stampede.db` file appears shortly after `pegasus-run` starts the workflow. If you only planned (not submitted), it won't exist. Start the workflow with `pegasus-run`, then re-run the monitor.
+2. **The path is wrong because `submit_dir` in `braindump.yml` doesn't match this host.** This happens when the workflow was planned inside a container and `braindump.yml` records a container path. The monitor's `auto` remap should detect this and rebase, but if it didn't (e.g. the recorded path coincidentally exists on this host but points to a different file tree), force the remap with `--remap-submit-dir always`. See [Container-planned workflows](#container-planned-workflows).
+
+**Auto-detection picked the wrong run directory**
+When given a workflow base directory, the monitor recursively searches for `braindump.yml` and selects the lexicographically last match (typically the highest-numbered `runNNNN`). If you want a specific older run, pass that run directory directly:
+
+```bash
+uv run workflow-monitor /path/to/submit/run0003   # not /path/to/submit
+```
+
+### HTCondor data
 
 **Live (Condor) column is always empty**
 The monitor could not reach the HTCondor schedd. Ensure `condor_q` is on your `PATH` (e.g. `. ~/condor/condor.sh`) and that the schedd is running. For remote pools, supply `--collector` and any required credential flags.
@@ -617,20 +711,83 @@ The monitor queries `condor_status` for pool-wide slot information. This require
 **Live column shows no efficiency data for completed jobs**
 The monitor queries `condor_history` for post-completion metrics (CPU efficiency, memory efficiency, disk usage). If `condor_history` is not available on your submit node, these fields are silently omitted — the monitor continues to work with data from the stampede database. This is normal on systems where history is kept on a central manager rather than the local schedd.
 
-**`--why-idle` shows "Could not query pool status" or "Could not query user priorities"**
-These are informational, not errors. The diagnostic works with whatever data sources are available. If `condor_status` or `condor_userprio` are not on your PATH, the corresponding checks are skipped and the remaining findings are still shown. Ensure HTCondor tools are on your PATH (e.g., `. ~/condor/condor.sh`) for the full diagnostic.
-
-**Dashboard appears garbled or cut off**
-The Rich layout adapts to your terminal size. Widen the terminal window for best results. A minimum width of ~100 columns is recommended.
-
 **Workflow shows RUNNING but condor_q shows no jobs**
 This is normal at the very start of a run while DAGMan is initializing, and during transitions between DAG nodes. The `UNSUBMITTED` state in the job table indicates jobs that are waiting on upstream dependencies.
+
+**`condor_q` returns thousands of unrelated jobs on a shared schedd**
+The monitor restricts `condor_q` results to jobs whose `Cmd` lives under the workflow's submit directory. If you're seeing unrelated jobs, the filter is mismatched — most likely because `--remap-submit-dir` rebased `submit_dir` to a host path while the schedd reports container paths in `Cmd`. The monitor uses the *recorded* (un-remapped) submit dir for this filter automatically; if you've explicitly forced `--remap-submit-dir never` or you're running an old version, that's where to look.
+
+### Container-planned workflows
+
+**Pool Resources / `--why-idle` shows my host's pool, not the container's**
+This is expected: the monitor's `--remap-submit-dir` only fixes file paths, not HTCondor connections. The host's `condor_q`/`condor_status` queries whatever pool your host config points at. Choose one of the three options described in [Container-planned workflows](#container-planned-workflows) (run inside the container, set `_CONDOR_COLLECTOR_HOST`, or publish container ports).
+
+**Publishing container ports — port collision with host condor**
+Your host condor pool is probably already listening on the default `9618`. Don't try `-p 9618:9618`. Either stop host condor for the duration (`condor_off -master`) or pick a different host-side port (e.g. `-p 127.0.0.1:9619:9618` and `_CONDOR_COLLECTOR_HOST=localhost:9619`). Bind to `127.0.0.1` so the throwaway pool isn't reachable from the LAN.
+
+**Publishing container ports — schedd reports an unreachable address**
+HTCondor's collector hands out the schedd's *advertised* address, which by default is the container's internal IP. Set `TCP_FORWARDING_HOST = 127.0.0.1` (not `NETWORK_HOSTNAME`, which leaks into auth) in the container's condor config so daemons publish a host-reachable address. Use `USE_SHARED_PORT = TRUE` + `SHARED_PORT_PORT = 9618` so you only need to publish one port.
+
+**Publishing container ports — auth fails between host and container**
+The default `SEC_DEFAULT_AUTHENTICATION_METHODS = FS` compares Unix UIDs via shared filesystem and fails across the container boundary. Add `CLAIMTOBE` (for permissive throwaway pools) or set up a token. Permissive `ALLOW_READ = */*` / `ALLOW_WRITE = */*` is necessary but not sufficient — it's *authorization*, not *authentication*.
+
+**HTCondor version skew between host and container**
+If the host's `condor_q` is much older than the container's schedd, some queries may return malformed output. Run `condor_version` on both sides; the host should ideally be the same major version or newer. Workflow-monitor uses `-json` output which is stable across recent versions, but `-long` ClassAd parsing (used by `--why-idle`'s `condor_userprio`) is more sensitive.
+
+### `--why-idle`
+
+**"Could not query pool status" or "Could not query user priorities"**
+Informational, not errors. The diagnostic works with whatever data sources are available. If `condor_status` or `condor_userprio` are not on your PATH, the corresponding checks are skipped and the remaining findings are still shown. Source the condor environment (e.g. `. ~/condor/condor.sh`) for the full diagnostic.
+
+**"No priority entry found for user 'pegasus'" but the user clearly exists**
+You're querying a different pool than the one that's running the workflow. If the workflow runs in a container, your host's `condor_userprio` doesn't know about the container's `pegasus` user. See [Container-planned workflows](#container-planned-workflows).
+
+**`--why-idle` says "no idle jobs found" but the dashboard shows queued jobs**
+The dashboard's `Queued` count comes from the stampede database (DAG state), but `--why-idle` queries `condor_q` for jobs in `JobStatus == 1` (idle). If those numbers diverge, you're likely viewing the wrong pool — same root cause as the priority issue above.
+
+### Server / Remote / SSH
 
 **SSH mode shows "No hold reason available" but LIVE shows the hold reason**
 Make sure the server was started with HTCondor accessible (`condor_q` on PATH). The server captures hold reasons via `htcondor_poll` events in the JSONL. If the server was started without HTCondor access, or if the job was held after the server stopped, the hold reason won't be in the log.
 
 **Server daemon dies silently**
 Check the daemon log file at `<log_path>.pid.log` (e.g., `workflow-events.pid.log`). On some systems, `screen -dmS monitor uv run workflow-monitor --serve-foreground ...` is more reliable than the double-fork daemon.
+
+**`--remote` connects but the dashboard never advances**
+The client polls the remote JSONL at `--sync-interval` (default 5s). If the file is empty or the server hasn't written events since you connected, you'll see the last known state. Verify on the server side: `tail -F /path/to/workflow-events.jsonl`. If new lines aren't being added, the server has stopped or the workflow has completed (look for `workflow_end`).
+
+**`--remote` with IPv6 address fails to parse**
+Wrap IPv6 addresses in brackets: `user@[2001:db8::1]:/path/to/log`. Without brackets, the colon-laden address is ambiguous with the `host:port` form.
+
+**`--remote` over a bastion/ProxyJump prompts for a password every cycle**
+Use `--ssh-identity` to point at a key, and configure the bastion in `--ssh-config` with `IdentityFile` and `IdentitiesOnly yes`. If a passphrase is still required, run `ssh-add` first so the agent caches it.
+
+**Diagnostics events missing in `--remote`**
+The diagnostics sidecar is fetched best-effort. Confirm the server was started with `--diagnose` (the sidecar `diagnostics-events.jsonl` should exist next to the main log on the server). The remote client silently skips a missing sidecar.
+
+### Replay
+
+**Replay finishes instantly / no events appear**
+The JSONL log is empty or contains only framing events. Verify with `wc -l workflow-events.jsonl` and inspect the first few lines. A normal log starts with `workflow_start` and `jobs_init`.
+
+**Replay timestamps look ancient**
+This is expected — replay shows the *original* timestamps from when the workflow ran. The "elapsed" counter in the status panel reflects real workflow elapsed time, not your replay time.
+
+### Display
+
+**Dashboard appears garbled or cut off**
+The Rich layout adapts to your terminal size. Widen the terminal window for best results. A minimum width of ~100 columns is recommended.
+
+**Colors look wrong or are absent**
+Set `TERM=xterm-256color` and ensure your terminal supports truecolor. The dashboard degrades gracefully on monochrome terminals but is best on truecolor.
+
+### Diagnostics layer (`--diagnose`)
+
+**No `STALL` panel ever appears even though the workflow is stuck**
+Several false-positive guards must clear before a stall is confirmed: a 60-second startup grace, two consecutive cycles meeting the heuristic threshold, and at least one job submitted. For idle workflows that *just* started, this is by design. Inspect `diagnostics-events.jsonl` directly to see what the engine is observing each cycle — the file logs every `diag_start` config so you can audit what thresholds are in effect.
+
+**`STALL` panel never disappears after the workflow recovers**
+A stall is resolved when the done count advances or new state transitions arrive. If neither happens (e.g. all jobs failed and the workflow exited), the panel will persist until the monitor exits — that is the correct signal.
 
 ## Development
 
